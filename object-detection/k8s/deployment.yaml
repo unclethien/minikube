@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: object-detection
+  labels:
+    app: object-detection
+    component: video-processing
+    workload: cpu-intensive
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: object-detection
+  template:
+    metadata:
+      labels:
+        app: object-detection
+        component: video-processing
+        workload: cpu-intensive
+    spec:
+      # Pod anti-affinity to spread replicas across nodes
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: workload
+                  operator: In
+                  values:
+                  - cpu-intensive
+              topologyKey: kubernetes.io/hostname
+      
+      # Tolerations for GPU nodes (if available)
+      tolerations:
+      - key: "gpu"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+      
+      containers:
+      - name: object-detection
+        image: object-detection:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        
+        env:
+        - name: PORT
+          value: "8000"
+        - name: CONFIDENCE_THRESHOLD
+          value: "0.25"
+        - name: IOU_THRESHOLD
+          value: "0.45"
+        - name: MAX_DETECTIONS
+          value: "300"
+        
+        # Resource requests and limits
+        resources:
+          requests:
+            cpu: "500m"       # 0.5 CPU cores
+            memory: "1Gi"     # 1 GB RAM
+          limits:
+            cpu: "2000m"      # 2 CPU cores
+            memory: "3Gi"     # 3 GB RAM
+        
+        # Liveness probe to restart unhealthy pods
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        
+        # Readiness probe to control traffic routing
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        # Startup probe for initial model loading
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 12  # Allow up to 2 minutes for startup
+
+

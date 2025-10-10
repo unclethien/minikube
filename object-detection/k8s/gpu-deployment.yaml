@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: object-detection-gpu
+  labels:
+    app: object-detection-gpu
+    component: video-processing
+    workload: gpu-intensive
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: object-detection-gpu
+  template:
+    metadata:
+      labels:
+        app: object-detection-gpu
+        component: video-processing
+        workload: gpu-intensive
+    spec:
+      # Node affinity for GPU nodes
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: gpu
+                operator: In
+                values:
+                - "true"
+      
+      # Toleration for GPU node taints
+      tolerations:
+      - key: "gpu"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+      
+      containers:
+      - name: object-detection-gpu
+        image: object-detection:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        
+        env:
+        - name: PORT
+          value: "8000"
+        - name: CONFIDENCE_THRESHOLD
+          value: "0.25"
+        - name: IOU_THRESHOLD
+          value: "0.45"
+        - name: MAX_DETECTIONS
+          value: "300"
+        
+        # Resource requests and limits with GPU
+        resources:
+          requests:
+            cpu: "1000m"
+            memory: "2Gi"
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "4000m"
+            memory: "8Gi"
+            nvidia.com/gpu: 1
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 12
+
+

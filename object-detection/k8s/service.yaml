@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: object-detection-service
+  labels:
+    app: object-detection
+    component: video-processing
+spec:
+  type: ClusterIP
+  selector:
+    app: object-detection
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  sessionAffinity: None
+
+
