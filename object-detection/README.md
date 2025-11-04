@@ -13,8 +13,8 @@ This component provides real-time object detection capabilities for video frames
 - **Batch Processing**: Support for processing multiple images
 - **Annotated Output**: Returns images with bounding boxes drawn
 - **Health Monitoring**: Built-in health check endpoints
-- **GPU Support**: Optional GPU acceleration for faster processing
 - **Horizontal Auto-scaling**: Automatically scales based on CPU/memory usage
+- **CPU-Optimized**: Efficient CPU-based inference using YOLOv11-nano
 
 ## API Endpoints
 
@@ -130,19 +130,6 @@ kubectl logs -l app=object-detection --tail=50
 kubectl top pods
 ```
 
-## GPU Deployment (Optional)
-
-If you have access to a node with GPU:
-
-```bash
-kubectl apply -f k8s/gpu-deployment.yaml
-```
-
-This deployment:
-- Requests a GPU resource
-- Has node affinity to select GPU-enabled nodes
-- Tolerates GPU node taints
-
 ## Configuration
 
 Environment variables:
@@ -153,13 +140,9 @@ Environment variables:
 
 ## Resource Requirements
 
-### CPU-based Deployment
+### CPU Deployment
 - **Requests**: 500m CPU, 1Gi RAM
 - **Limits**: 2000m CPU, 3Gi RAM
-
-### GPU-based Deployment
-- **Requests**: 1000m CPU, 2Gi RAM, 1 GPU
-- **Limits**: 4000m CPU, 8Gi RAM, 1 GPU
 
 ## Scaling
 
@@ -213,8 +196,8 @@ kubectl describe hpa object-detection-hpa
 
 - YOLOv11-nano is optimized for speed while maintaining good accuracy
 - Average inference time: 50-100ms per image (CPU)
-- Average inference time: 10-30ms per image (GPU)
 - Supports COCO dataset classes (80 classes including person, car, etc.)
+- Horizontal scaling allows aggregate throughput of 20-90 images/sec
 
 ## Future Enhancements
 

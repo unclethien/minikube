@@ -32,13 +32,6 @@ spec:
                   - cpu-intensive
               topologyKey: kubernetes.io/hostname
       
-      # Tolerations for GPU nodes (if available)
-      tolerations:
-      - key: "gpu"
-        operator: "Equal"
-        value: "true"
-        effect: "NoSchedule"
-      
       containers:
       - name: object-detection
         image: object-detection:latest

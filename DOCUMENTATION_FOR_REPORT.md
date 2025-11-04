@@ -180,8 +180,8 @@ The complete source code is available in the project repository:
 4. **Image Format Compatibility**: Different image sources (rescaling component, input server) may send images in various formats (JPEG, PNG, raw bytes).
    - **Solution**: Implemented robust image decoding using OpenCV's `imdecode` function which automatically handles multiple formats, and added file type validation.
 
-5. **GPU Optimization**: The component is designed to leverage GPU acceleration for significantly faster inference (3-5x speedup compared to CPU-only execution).
-   - **Solution**: Created two deployment configurations - a standard CPU-based deployment for testing/development and a GPU-optimized deployment for production. The production deployment on the team VM utilizes an NVIDIA GPU through Kubernetes resource scheduling, with node affinity rules ensuring pods are placed on the GPU-enabled node. GPU taints and tolerations prevent non-GPU workloads from consuming the expensive GPU resources.
+5. **GPU Availability**: While the component can benefit from GPU acceleration, the deployment environment uses CPU-based execution.
+   - **Solution**: Optimized the deployment for CPU execution using the YOLOv11-nano model variant, which provides an excellent balance of speed and accuracy. The CPU deployment uses optimized inference settings and can scale horizontally from 2 to 6 pods to handle increased load. Future enhancements could include GPU acceleration if GPU nodes become available.
 
 ---
 
@@ -189,15 +189,7 @@ The complete source code is available in the project repository:
 
 ### Component 3: Video Processing - Object Detection
 
-**Production Deployment (GPU-Enabled VM):**
-- **CPU Request**: 1000m (1 CPU core)
-- **CPU Limit**: 4000m (4 CPU cores)
-- **Memory Request**: 2Gi (2 GB RAM)
-- **Memory Limit**: 8Gi (8 GB RAM)
-- **GPU Request**: 1 (1 NVIDIA GPU)
-- **GPU Limit**: 1 (1 NVIDIA GPU)
-
-**Development Deployment (CPU-Only, for local testing):**
+**CPU-Based Deployment:**
 - **CPU Request**: 500m (0.5 CPU cores)
 - **CPU Limit**: 2000m (2 CPU cores)
 - **Memory Request**: 1Gi (1 GB RAM)
@@ -207,56 +199,43 @@ The complete source code is available in the project repository:
 
 The resource requests and limits were determined through empirical testing and profiling:
 
-1. **Memory Requirements**: YOLOv11-nano model requires approximately 200-300MB for the model weights. Processing a single 1080p image requires an additional 300-500MB for intermediate tensors and computations. With GPU acceleration, additional VRAM (~1GB) is used on the GPU itself. The 2Gi memory request provides a comfortable buffer for CPU operations, while the 8Gi limit accommodates batch processing and peak loads.
+1. **Memory Requirements**: YOLOv11-nano model requires approximately 200-300MB for the model weights. Processing a single 1080p image requires an additional 300-500MB for intermediate tensors and computations. The 1Gi request provides a comfortable buffer, while the 3Gi limit prevents a single pod from consuming excessive resources while allowing for batch processing.
 
-2. **CPU Requirements**: Even with GPU acceleration, CPU resources are needed for image preprocessing, result post-processing, and HTTP request handling. The 1000m request ensures sufficient CPU for these operations, while the 4000m limit allows for efficient handling of concurrent requests without CPU bottlenecks.
+2. **CPU Requirements**: Object detection is computationally intensive. YOLOv11-nano can process approximately 10-15 images per second per pod on modern CPU hardware. The 500m request ensures each pod has dedicated resources, while the 2000m limit allows bursting during peak loads to maintain responsiveness.
 
-3. **GPU Optimization**: The component utilizes an NVIDIA GPU, which provides a 3-5x speedup over CPU-only execution. With GPU acceleration, YOLOv11-nano can process approximately 30-50 images per second, enabling real-time video processing. The dedicated GPU ensures consistent low-latency inference critical for security monitoring applications.
+3. **Horizontal Scaling**: To compensate for CPU-only execution, the deployment leverages Kubernetes horizontal scaling. Multiple pods (2-6) can run concurrently, distributing the load and providing aggregate throughput of 20-90 images per second depending on demand.
 
 **Horizontal Pod Autoscaler Configuration:**
-- **Min Replicas**: 1 (single GPU node available)
-- **Max Replicas**: 2 (limited by GPU availability - requires additional GPU nodes to scale beyond 2)
+- **Min Replicas**: 2 (ensures high availability)
+- **Max Replicas**: 6 (prevents excessive resource consumption)
 - **CPU Target**: 70% average utilization
 - **Memory Target**: 80% average utilization
-- **Scale Up Policy**: Increase by 1 pod when metrics exceed targets for 30 seconds (if additional GPU node available)
-- **Scale Down Policy**: Decrease to minimum when metrics are below targets for 5 minutes
-
-**Note**: Scaling is constrained by GPU availability. Each pod requires one dedicated GPU. The current configuration supports up to 2 pods if a second GPU node is added to the cluster.
+- **Scale Up Policy**: Increase by 100% or 2 pods (whichever is greater) when metrics exceed targets for 30 seconds
+- **Scale Down Policy**: Decrease by 50% when metrics are below targets for 5 minutes
 
 **Pod Scheduling Constraints:**
 
-1. **GPU Node Affinity**: The production deployment uses `requiredDuringSchedulingIgnoredDuringExecution` node affinity to ensure pods are scheduled exclusively on nodes with the `gpu=true` label. This guarantees that object detection pods have access to GPU resources.
-
-2. **GPU Taint Toleration**: Pods have a toleration for the `gpu=true:NoSchedule` taint, allowing them to be scheduled on the GPU node while preventing non-GPU workloads from consuming the expensive GPU resources. This ensures the GPU is reserved for computationally intensive object detection tasks.
-
-3. **Pod Anti-Affinity**: The deployment uses `preferredDuringSchedulingIgnoredDuringExecution` pod anti-affinity with the label `workload: gpu-intensive`. If multiple GPU nodes become available, this spreads object detection pods across nodes to:
+1. **Pod Anti-Affinity**: The deployment uses `preferredDuringSchedulingIgnoredDuringExecution` pod anti-affinity with the label `workload: cpu-intensive`. This spreads object detection pods across multiple nodes to:
    - Distribute computational load
    - Improve fault tolerance
-   - Prevent resource contention on a single GPU node
+   - Prevent resource contention on a single node
+
+2. **Node Selection**: Pods are scheduled on standard CPU nodes alongside other components, with the anti-affinity rules ensuring even distribution across available nodes.
 
 **Enhanced Resource Allocation Strategy:**
 
-To optimize the overall system performance, Component 3 (Object Detection) is strategically isolated from other components:
+To optimize the overall system performance, Component 3 (Object Detection) coordinates with Component 2 (Rescaling):
 
-1. **Dedicated GPU Node**: Component 3 runs on a dedicated GPU-enabled node, separate from Component 2 (Rescaling) which runs on CPU-only nodes. This ensures:
-   - No resource contention between computationally intensive components
-   - GPU resources exclusively reserved for object detection
-   - Optimal performance for both rescaling and detection operations
+1. **Shared Anti-Affinity Label**: Both Components 2 and 3 share the `workload: cpu-intensive` label, ensuring these computationally expensive components are distributed across different nodes in the cluster when possible.
 
-2. **Node Labeling Strategy**: 
-   - GPU node labeled with `gpu=true` and `workload=gpu-intensive`
-   - CPU nodes labeled with `workload=cpu-intensive` for rescaling pods
-   - Clear separation ensures proper pod placement
+2. **Load Balancing**: The Kubernetes Service uses round-robin load balancing across available pods, distributing incoming requests evenly and maximizing throughput through parallel processing.
 
-3. **Load Balancing**: The Kubernetes Service uses round-robin load balancing across available GPU pods, distributing incoming requests evenly while maximizing GPU utilization.
+3. **Priority-Based Scheduling**: In resource-constrained environments, object detection pods can be assigned a higher priority class to ensure critical security monitoring functionality remains available.
 
-4. **Priority-Based Scheduling**: Object detection pods are assigned a higher priority class to ensure critical security monitoring functionality remains available even under resource constraints.
-
-5. **Resource Quotas**: Recommended namespace resource quotas:
-   - Total CPU: 8 cores (allows GPU pod overhead + other components)
-   - Total Memory: 16Gi (allows GPU pod + other components)
-   - Total GPUs: 1 (dedicated to object detection)
-   - Total Pods: 10 (allows room for all components)
+4. **Resource Quotas**: Recommended namespace resource quotas:
+   - Total CPU: 12 cores (allows 6 pods at limit)
+   - Total Memory: 18Gi (allows 6 pods at limit)
+   - Total Pods: 10 (allows room for other components)
 
 ---
 
@@ -329,12 +308,11 @@ To optimize the overall system performance, Component 3 (Object Detection) is st
    - Verify detection results are properly stored with metadata
    - Test system under load with multiple concurrent requests
 
-3. **GPU Configuration** (Confirmed - GPU Available)
-   - GPU-enabled VM confirmed for Component 3 deployment
-   - Will label GPU node with `gpu=true` in the cluster
-   - Will apply GPU taint to prevent non-GPU workloads
-   - Will deploy GPU-optimized version using `k8s/gpu-deployment.yaml`
-   - Expected 3-5x performance improvement over CPU-only execution
+3. **Production VM Deployment** (In Progress)
+   - Preparing to deploy to team VM (csa-6343-104.utdallas.edu)
+   - Will use CPU-optimized deployment with horizontal scaling
+   - Will configure inter-component communication with other services
+   - Will validate performance under realistic workload conditions
 
 **Problems Encountered:**
 
@@ -356,63 +334,48 @@ To optimize the overall system performance, Component 3 (Object Detection) is st
 **Deployment Architecture:**
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│          Kubernetes Cluster (Production)                 │
-│                                                          │
-│  ┌────────────────────────────────────────────────────┐ │
-│  │  Object Detection Deployment (GPU-Enabled)         │ │
-│  │                                                    │ │
-│  │  ┌──────────────────────────────────────────┐     │ │
-│  │  │   Pod 1 (GPU Node)                       │     │ │
-│  │  │   Label: gpu=true, workload=gpu-intensive│     │ │
-│  │  │                                          │     │ │
-│  │  │  ┌──────────────────────────┐            │     │ │
-│  │  │  │  YOLOv11 + Flask API     │            │     │ │
-│  │  │  │  CPU: 1-4 cores          │            │     │ │
-│  │  │  │  RAM: 2-8 GB             │            │     │ │
-│  │  │  │  GPU: 1x NVIDIA GPU      │            │     │ │
-│  │  │  └──────────────────────────┘            │     │ │
-│  │  │                                          │     │ │
-│  │  └──────────────────┬───────────────────────┘     │ │
-│  │                     │                             │ │
-│  └─────────────────────┼─────────────────────────────┘ │
-│                        │                               │
-│  ┌─────────────────────┴─────────────────────────────┐ │
-│  │   Service: object-detection-service               │ │
-│  │   Type: ClusterIP                                 │ │
-│  │   Port: 8000                                      │ │
-│  │   Selector: app=object-detection-gpu              │ │
-│  └─────────────────────┬─────────────────────────────┘ │
-│                        │                               │
-│  ┌─────────────────────┴─────────────────────────────┐ │
-│  │  Horizontal Pod Autoscaler (GPU-Constrained)      │ │
-│  │  Min: 1, Max: 2, Target CPU: 70%                 │ │
-│  │  (Scaling limited by GPU availability)            │ │
-│  └───────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│          Kubernetes Cluster (Production)        │
+│                                                 │
+│  ┌───────────────────────────────────────────┐ │
+│  │  Object Detection Deployment              │ │
+│  │                                           │ │
+│  │  ┌─────────────┐      ┌─────────────┐   │ │
+│  │  │   Pod 1     │      │   Pod 2     │   │ │
+│  │  │  (Node A)   │      │  (Node B)   │   │ │
+│  │  │             │      │             │   │ │
+│  │  │  YOLOv11    │      │  YOLOv11    │   │ │
+│  │  │  Flask API  │      │  Flask API  │   │ │
+│  │  │  CPU:0.5-2  │      │  CPU:0.5-2  │   │ │
+│  │  │  RAM:1-3GB  │      │  RAM:1-3GB  │   │ │
+│  │  └─────────────┘      └─────────────┘   │ │
+│  │         ↑                     ↑          │ │
+│  └─────────┼─────────────────────┼──────────┘ │
+│            │                     │            │
+│  ┌─────────┴─────────────────────┴──────────┐ │
+│  │   Service: object-detection-service      │ │
+│  │   Type: ClusterIP                        │ │
+│  │   Port: 8000                             │ │
+│  └─────────────────┬────────────────────────┘ │
+│                    │                          │
+│  ┌─────────────────┴────────────────────────┐ │
+│  │  Horizontal Pod Autoscaler               │ │
+│  │  Min: 2, Max: 6, Target CPU: 70%        │ │
+│  └──────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────┘
 
 Network Flow:
-Rescaling (CPU Node) → Service → GPU Pod → Storage Server
+Input → Rescaling → Object Detection → Storage → Output
 ```
 
-**Performance Metrics:**
+**Performance Metrics (Local Testing):**
 
-*Local Testing (CPU-only on MacBook Pro M1):*
-- **Average Inference Time**: 80ms per image (1080p)
+- **Average Inference Time**: 80ms per image (1080p, CPU-only on MacBook Pro M1)
 - **Throughput**: ~12 images/second per pod
 - **Memory Usage**: 800MB-1.2GB per pod under load
 - **CPU Usage**: 60-80% of limit under steady load
-
-*Expected Production Performance (with NVIDIA GPU):*
-- **Average Inference Time**: 15-25ms per image (1080p) - **3-5x faster**
-- **Throughput**: ~35-50 images/second per pod - **3-4x increase**
-- **GPU Memory Usage**: ~1GB VRAM
-- **System Memory Usage**: 1.5-2.5GB per pod
-- **GPU Utilization**: 70-90% under steady load
-
-*Startup Times (Both Configurations):*
-- **Cold Start Time**: 90-120 seconds (including model download and GPU initialization)
-- **Warm Start Time**: 15-20 seconds (model cached, GPU ready)
+- **Cold Start Time**: 90-120 seconds (including model download)
+- **Warm Start Time**: 15-20 seconds (model already cached)
 
 **Configuration Files Summary:**
 

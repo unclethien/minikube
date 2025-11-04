@@ -145,10 +145,6 @@ curl http://<service-url>/info
 - Limit: 2000m CPU, 3Gi RAM
 - Replicas: 2-6 (auto-scaled)
 
-### GPU Deployment (Optional)
-- Request: 1000m CPU, 2Gi RAM, 1 GPU
-- Limit: 4000m CPU, 8Gi RAM, 1 GPU
-- Replicas: 1
 
 ## 📝 Configuration
 
