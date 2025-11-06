@@ -18,7 +18,11 @@ spec:
         component: video-processing
         workload: cpu-intensive
     spec:
-      # Pod anti-affinity to spread replicas across nodes
+      # Deploy to specific node (csa-6343-104.utdallas.edu) in K3s cluster
+      nodeSelector:
+        workload: object-detection
+
+      # Pod anti-affinity to spread replicas across nodes (if multiple nodes have the label)
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -31,7 +35,7 @@ spec:
                   values:
                   - cpu-intensive
               topologyKey: kubernetes.io/hostname
-      
+
       containers:
       - name: object-detection
         image: object-detection:latest

@@ -80,7 +80,68 @@ docker run -p 8000:8000 object-detection:latest
 python test_client.py http://localhost:8000 test_image.jpg
 ```
 
-## Kubernetes Deployment with Minikube
+## K3s Cluster Deployment
+
+### Team Setup
+This component is deployed to a 4-node K3s cluster:
+- **Master Node**: csa-6343-102.utdallas.edu
+- **Target Node**: csa-6343-104.utdallas.edu (labeled: `workload=object-detection`)
+- **Platform**: K3s (https://k3s.io/)
+
+### Quick Deployment
+
+See [DEPLOY_TO_VM.md](../DEPLOY_TO_VM.md) for complete deployment instructions.
+
+#### On Worker Node 104 (Build):
+```bash
+# Build and import image
+docker build -t object-detection:latest .
+docker save object-detection:latest -o /tmp/object-detection.tar
+sudo k3s ctr images import /tmp/object-detection.tar
+```
+
+#### On Master Node 102 (Deploy):
+```bash
+# Label the target node
+kubectl label nodes csa-6343-104.utdallas.edu workload=object-detection --overwrite
+
+# Deploy to K3s
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/hpa.yaml
+```
+
+### Access the Service
+
+**Internal Cluster Access** (from any pod):
+```bash
+curl http://object-detection-service:8000/health
+```
+
+**Port Forward for Testing** (from master node):
+```bash
+kubectl port-forward svc/object-detection-service 8000:8000
+curl http://localhost:8000/health
+```
+
+### Monitor the Deployment
+```bash
+# Check pods (should be on node 104)
+kubectl get pods -l app=object-detection -o wide
+
+# Check HPA status
+kubectl get hpa
+
+# View logs
+kubectl logs -l app=object-detection --tail=50
+
+# Check resource usage
+kubectl top pods -l app=object-detection
+```
+
+## Local Testing with Minikube (Optional)
+
+For local development and testing before VM deployment:
 
 ### 1. Start Minikube
 ```bash
@@ -93,41 +154,18 @@ eval $(minikube docker-env)
 docker build -t object-detection:latest .
 ```
 
-### 3. Deploy to Kubernetes
+### 3. Deploy to Minikube
 ```bash
-# Deploy the application
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
-
-# Enable metrics server (required for HPA)
 minikube addons enable metrics-server
-
-# Deploy Horizontal Pod Autoscaler
 kubectl apply -f k8s/hpa.yaml
 ```
 
-### 4. Access the service
+### 4. Test locally
 ```bash
-# Get the service URL
 minikube service object-detection-service --url
-
-# Test the service
 python test_client.py $(minikube service object-detection-service --url) test_image.jpg
-```
-
-### 5. Monitor the deployment
-```bash
-# Check pods
-kubectl get pods -l app=object-detection
-
-# Check HPA status
-kubectl get hpa
-
-# View logs
-kubectl logs -l app=object-detection --tail=50
-
-# Check resource usage
-kubectl top pods
 ```
 
 ## Configuration

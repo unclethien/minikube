@@ -70,27 +70,42 @@ grep -ri "gpu" . --exclude-dir=venv
 ## Ready for Deployment
 
 The package is now **100% CPU-only** and ready to deploy to:
-```
-VM: csa-6343-104.utdallas.edu
-User: dxn210021
-Password: Sugarland2019!@#$
-```
 
-## Quick Deploy Steps
+**K3s Cluster Setup:**
+- Platform: K3s (https://k3s.io/)
+- Master Node: csa-6343-102.utdallas.edu
+- Target Node: csa-6343-104.utdallas.edu
+- User: dxn210021
+- Password: Sugarland2019!@#$
+
+## Quick Deploy Steps for K3s
 
 ```bash
-# 1. Transfer to VM
+# 1. Transfer to Worker Node 104
 scp object-detection-deployment.tar.gz dxn210021@csa-6343-104.utdallas.edu:/tmp/
 
-# 2. SSH to VM
+# 2. SSH to Node 104
 ssh dxn210021@csa-6343-104.utdallas.edu
 
-# 3. Extract and Deploy
+# 3. Extract and Build
 cd /tmp
 tar -xzf object-detection-deployment.tar.gz
 cd object-detection
-./deploy-vm.sh
+docker build -t object-detection:latest .
+
+# 4. Import to K3s containerd
+docker save object-detection:latest -o /tmp/object-detection.tar
+sudo k3s ctr images import /tmp/object-detection.tar
+
+# 5. Deploy from Master Node 102
+ssh dxn210021@csa-6343-102.utdallas.edu
+kubectl label nodes csa-6343-104.utdallas.edu workload=object-detection --overwrite
+kubectl apply -f /path/to/k8s/deployment.yaml
+kubectl apply -f /path/to/k8s/service.yaml
+kubectl apply -f /path/to/k8s/hpa.yaml
 ```
+
+**See [DEPLOY_TO_VM.md](DEPLOY_TO_VM.md) for complete step-by-step instructions.**
 
 ## Package Verification
 

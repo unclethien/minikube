@@ -1,8 +1,26 @@
 # Object Detection Component - Quick Reference
 
-## 🚀 One-Line Deployment
+## 🏗️ K3s Cluster Setup
+- **Master Node**: csa-6343-102.utdallas.edu
+- **Target Node**: csa-6343-104.utdallas.edu
+- **Service URL**: `http://object-detection-service:8000` (internal)
+
+## 🚀 Quick Deployment to K3s
+
+### On Node 104 (Build):
 ```bash
-./deploy.sh
+cd /tmp/object-detection
+docker build -t object-detection:latest .
+docker save object-detection:latest -o /tmp/object-detection.tar
+sudo k3s ctr images import /tmp/object-detection.tar
+```
+
+### On Master Node 102 (Deploy):
+```bash
+kubectl label nodes csa-6343-104.utdallas.edu workload=object-detection --overwrite
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/hpa.yaml
 ```
 
 ## 📋 Common Commands
@@ -16,12 +34,16 @@ kubectl apply -f k8s/
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/hpa.yaml
+
+# Check deployment on correct node
+kubectl get pods -l app=object-detection -o wide
+# Should show NODE: csa-6343-104.utdallas.edu
 ```
 
 ### Monitoring
 ```bash
-# Check pod status
-kubectl get pods -l app=object-detection
+# Check pod status (with node info)
+kubectl get pods -l app=object-detection -o wide
 
 # View logs (live)
 kubectl logs -l app=object-detection -f
@@ -31,6 +53,7 @@ kubectl get hpa object-detection-hpa
 
 # View resource usage
 kubectl top pods -l app=object-detection
+kubectl top nodes
 
 # Describe pod (troubleshooting)
 kubectl describe pod <pod-name>
@@ -38,17 +61,16 @@ kubectl describe pod <pod-name>
 
 ### Testing
 ```bash
-# Get service URL
-minikube service object-detection-service --url
+# Port-forward from master node
+kubectl port-forward svc/object-detection-service 8000:8000
 
-# Test with image
-python test_client.py $(minikube service object-detection-service --url) test.jpg
+# In another terminal, test
+curl http://localhost:8000/health
+python test_client.py http://localhost:8000 test.jpg
 
-# Test health endpoint
-curl $(minikube service object-detection-service --url)/health
-
-# Test model info
-curl $(minikube service object-detection-service --url)/info
+# Or test from within cluster
+kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- \
+  curl http://object-detection-service:8000/health
 ```
 
 ### Scaling
@@ -76,15 +98,43 @@ kubectl delete -f k8s/
 
 ### Pod not starting
 ```bash
+# Check pod events and status
 kubectl describe pod <pod-name>
 kubectl logs <pod-name>
+
+# Check if on correct node
+kubectl get pods -l app=object-detection -o wide
+# Should show NODE: csa-6343-104.utdallas.edu
+```
+
+### Pod not scheduled to node 104
+```bash
+# Check node label
+kubectl get nodes --show-labels | grep csa-6343-104
+
+# Re-label if needed
+kubectl label nodes csa-6343-104.utdallas.edu workload=object-detection --overwrite
+```
+
+### Image not found (K3s)
+```bash
+# Check image on node 104
+ssh dxn210021@csa-6343-104.utdallas.edu
+sudo k3s ctr images ls | grep object-detection
+
+# Re-import if missing
+docker save object-detection:latest -o /tmp/object-detection.tar
+sudo k3s ctr images import /tmp/object-detection.tar
 ```
 
 ### Service not accessible
 ```bash
-kubectl get svc
-kubectl describe svc object-detection-service
-minikube service list
+# Check service and endpoints
+kubectl get svc object-detection-service
+kubectl get endpoints object-detection-service
+
+# Port-forward for testing
+kubectl port-forward svc/object-detection-service 8000:8000
 ```
 
 ### HPA not working
@@ -92,20 +142,30 @@ minikube service list
 # Check metrics-server
 kubectl get pods -n kube-system | grep metrics-server
 
-# Enable if needed
-minikube addons enable metrics-server
-
 # Check HPA events
 kubectl describe hpa object-detection-hpa
+
+# Check pod metrics
+kubectl top pods -l app=object-detection
 ```
 
 ### Out of memory
 ```bash
 # Check resource usage
-kubectl top pods
+kubectl top pods -l app=object-detection
+kubectl describe pod <pod-name> | grep -A 5 Limits
 
 # Increase limits in k8s/deployment.yaml
 # Then reapply: kubectl apply -f k8s/deployment.yaml
+```
+
+### YOLOv11 model download slow
+```bash
+# Check pod logs for download progress
+kubectl logs <pod-name> | grep -i download
+
+# Model downloads on first run (~5.4MB, may take 30-60s)
+# Startup probe allows up to 2 minutes for initialization
 ```
 
 ## 📊 API Endpoints
@@ -179,9 +239,34 @@ Key labels:
 - `component: video-processing`
 - `workload: cpu-intensive`
 
+Node labels (for scheduling):
+- Node 104: `workload=object-detection`
+
 Used for:
 - Service selection
+- Node scheduling (nodeSelector)
 - Pod anti-affinity
 - Monitoring/logging
+
+## 📦 K3s Notes
+
+**Image Management:**
+- K3s uses containerd (not Docker daemon)
+- Images must be imported: `sudo k3s ctr images import <tar-file>`
+- Check images: `sudo k3s ctr images ls`
+
+**Node Scheduling:**
+- Pods scheduled to node 104 via `nodeSelector`
+- Label must be set: `kubectl label nodes csa-6343-104.utdallas.edu workload=object-detection`
+
+**Service Access:**
+- Internal: `http://object-detection-service:8000`
+- External testing: Use `kubectl port-forward`
+
+## 📚 Full Documentation
+
+- Complete deployment guide: [DEPLOY_TO_VM.md](../DEPLOY_TO_VM.md)
+- K3s cluster setup: [K3S_DEPLOYMENT_SUMMARY.md](../K3S_DEPLOYMENT_SUMMARY.md)
+- Detailed README: [README.md](README.md)
 
 
