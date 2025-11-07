@@ -1,6 +1,6 @@
 """
 Object Detection Server for Video Processing Pipeline
-Uses YOLOv11 for real-time object detection on video frames
+Uses YOLO12 for real-time object detection on video frames
 """
 
 from flask import Flask, request, jsonify
@@ -16,10 +16,10 @@ from datetime import datetime
 app = Flask(__name__)
 CORS(app)
 
-# Load YOLOv11 model (using nano version for efficiency)
+# Load YOLO12 model (using nano version for efficiency)
 # Model will be downloaded automatically on first run
-print("Loading YOLOv11 model...")
-model = YOLO('yolo11n.pt')  # yolo11n.pt is the nano version (fastest)
+print("Loading YOLO12 model...")
+model = YOLO('yolo12n.pt')  # yolo12n.pt is the nano version (fastest)
 print("Model loaded successfully!")
 
 # Configuration

@@ -17,16 +17,16 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a non-privileged user
+# Create a non-privileged user with home directory for cache
 ARG UID=10001
 RUN adduser \
     --disabled-password \
     --gecos "" \
-    --home "/nonexistent" \
+    --home "/home/appuser" \
     --shell "/sbin/nologin" \
-    --no-create-home \
     --uid "${UID}" \
     appuser
 
@@ -36,11 +36,20 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip && \
     python -m pip install -r requirements.txt
 
-# Switch to non-privileged user
-USER appuser
+# Download YOLO12 model directly from GitHub releases
+RUN wget -q https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo12n.pt -O /app/yolo12n.pt && \
+    chmod 644 /app/yolo12n.pt && \
+    ls -lh /app/yolo12n.pt
 
 # Copy application code
 COPY --chown=appuser:appuser . .
+
+# Create cache directories and set permissions
+RUN mkdir -p /home/appuser/.config/matplotlib /home/appuser/.config/Ultralytics && \
+    chown -R appuser:appuser /home/appuser
+
+# Switch to non-privileged user
+USER appuser
 
 # Expose the application port
 EXPOSE 8000
@@ -50,6 +59,8 @@ ENV PORT=8000
 ENV CONFIDENCE_THRESHOLD=0.25
 ENV IOU_THRESHOLD=0.45
 ENV MAX_DETECTIONS=300
+ENV MPLCONFIGDIR=/home/appuser/.config/matplotlib
+ENV YOLO_CONFIG_DIR=/home/appuser/.config/Ultralytics
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \

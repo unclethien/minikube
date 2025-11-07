@@ -1,0 +1,26 @@
+.vscode/
+.history/
+.idea/
+*.sublime-workspace
+*.sublime-project
+*.code-workspace
+*.user
+*.sln
+*.userprefs
+*.csproj
+*.unityproj
+*.pidb
+*.suo
+*.tmp
+*.log
+
+.DS_Store
+
+# claude related file
+
+.claude/*
+docs/*
+plans/*
+CLAUDE.md
+
+*.tar

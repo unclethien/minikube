@@ -3,6 +3,7 @@
 ## Cluster Setup Overview
 
 **K3s Cluster Configuration:**
+
 - Master Node: `csa-6343-102.utdallas.edu`
 - Worker Nodes: `csa-6343-101`, `csa-6343-103`, `csa-6343-104.utdallas.edu`
 - **Object Detection Target Node:** `csa-6343-104.utdallas.edu`
@@ -18,133 +19,86 @@ kubectl get nodes
 # Should show all 4 nodes in Ready state
 ```
 
-## Step 1: Transfer Files to Target VM
+## Step 1: Transfer Files to Master Node
 
-Transfer the deployment package to node 104 where the object detection service will run:
+**Important:** Always manage deployments through the master node (102) for proper cluster management:
 
 ```bash
 # On your local machine
 cd /Users/thiennguyen/Documents/GitHub/minikube
 
-# Transfer to node 104 (worker node for object detection)
-scp object-detection-deployment.tar.gz dxn210021@csa-6343-104.utdallas.edu:/tmp/
+# Transfer to MASTER node (102), not worker nodes
+scp object-detection-deployment.tar.gz dxn210021@csa-6343-102.utdallas.edu:~/tmp/
 # Password: Sugarland2019!@#$
 ```
 
-## Step 2: SSH into Worker Node 104
+## Step 2: SSH into Master Node 102
 
 ```bash
-ssh dxn210021@csa-6343-104.utdallas.edu
+ssh dxn210021@csa-6343-102.utdallas.edu
 # Password: Sugarland2019!@#$
 ```
 
-## Step 3: Extract and Setup (On Node 104)
+## Step 3: Extract and Setup (On Master Node)
 
 ```bash
-# Go to /tmp directory
-cd /tmp
-
-# Extract the files
+# Extract the files on master node
+cd ~
 tar -xzf object-detection-deployment.tar.gz
-
-# Go into the directory
 cd object-detection
 
-# Verify K3s tools are available
-kubectl version --client
+# Verify K3s cluster status
+kubectl get nodes -o wide
+# Should show all 4 nodes in Ready state
 ```
 
-## Step 4: Build Docker Image on Node 104
+## Step 4: Build Docker Image (On Master Node)
 
 ```bash
-# Build the image locally on node 104
+# Build the image on master node
 docker build -t object-detection:latest .
 
 # Verify the image
 docker images | grep object-detection
-
-# Tag for local K3s registry (K3s uses containerd)
-# The image will be available on this node
 ```
 
-## Step 5: Label Node 104 for Object Detection (From Master Node)
+## Step 5: Distribute Image to Target Node (From Master)
 
-SSH to the master node to label node 104 for object detection workload:
+Since K3s uses containerd, we need to distribute the image to node 104:
 
 ```bash
-# Exit from node 104
-exit
+# Save the Docker image to a tar file
+docker save object-detection:latest -o /tmp/object-detection.tar
 
-# SSH to master node (102)
-ssh dxn210021@csa-6343-102.utdallas.edu
+# Transfer image to node 104
+scp /tmp/object-detection.tar dxn210021@csa-6343-104.utdallas.edu:/tmp/
 
-# Label node 104 for object detection
+# SSH to node 104 and import to K3s
+ssh dxn210021@csa-6343-104.utdallas.edu "sudo k3s ctr images import /tmp/object-detection.tar && rm /tmp/object-detection.tar"
+
+# Clean up local tar file
+rm /tmp/object-detection.tar
+
+echo "Image distributed to node 104 successfully!"
+```
+
+## Step 6: Label Node 104 for Object Detection (On Master)
+
+```bash
+# Label node 104 for object detection workload
 kubectl label nodes csa-6343-104.utdallas.edu workload=object-detection --overwrite
 
 # Verify the label
 kubectl get nodes --show-labels | grep csa-6343-104
 ```
 
-## Step 6: Test Locally on Node 104 (Optional but Recommended)
+## Step 7: Deploy to K3s Cluster (From Master Node)
 
-Before deploying to K3s, test the container locally on node 104:
-
-```bash
-# SSH back to node 104
-ssh dxn210021@csa-6343-104.utdallas.edu
-
-# Run container locally to test
-docker run -d -p 8000:8000 --name test-object-detection object-detection:latest
-
-# Wait for model download and startup (may take 30-60 seconds)
-sleep 30
-
-# Test the health endpoint
-curl http://localhost:8000/health
-
-# Test object detection with a sample (if you have test_client.py)
-# python3 test_client.py http://localhost:8000 test_image.jpg
-
-# If working, stop and remove test container
-docker stop test-object-detection
-docker rm test-object-detection
-```
-
-## Step 7: Import Docker Image to K3s (On Node 104)
-
-K3s uses containerd, so we need to save and import the image:
+Deploy all resources from the master node:
 
 ```bash
-# Save the Docker image to a tar file
-docker save object-detection:latest -o /tmp/object-detection.tar
-
-# Import to K3s/containerd
-sudo k3s ctr images import /tmp/object-detection.tar
-
-# Verify image is available in K3s
-sudo k3s ctr images ls | grep object-detection
-
-# Clean up tar file
-rm /tmp/object-detection.tar
-```
-
-## Step 8: Deploy to K3s Cluster (From Master Node 102)
-
-Deploy from the master node to manage the cluster:
-
-```bash
-# If not already on master, SSH to it
-ssh dxn210021@csa-6343-102.utdallas.edu
-
-# Copy k8s configs from node 104 to master (or clone your repo)
-# Option 1: Copy files
-scp -r dxn210021@csa-6343-104.utdallas.edu:/tmp/object-detection/k8s /tmp/object-detection-k8s
-
-# Option 2: Or navigate if already available
-cd /path/to/object-detection
-
-# Check K3s cluster status
-kubectl get nodes -o wide
+# Ensure you're in the object-detection directory
+cd ~/object-detection
 
 # Apply the deployment (with node selector for node 104)
 kubectl apply -f k8s/deployment.yaml
@@ -155,12 +109,16 @@ kubectl apply -f k8s/service.yaml
 # Apply HPA if metrics-server is available
 kubectl apply -f k8s/hpa.yaml
 
+# Wait for pods to be ready (may take 2-3 minutes for model download)
+echo "Waiting for pods to start..."
+kubectl wait --for=condition=ready pod -l app=object-detection --timeout=180s || true
+
 # Check deployment status
 kubectl get pods -l app=object-detection -o wide
 kubectl get svc object-detection-service
 ```
 
-## Step 9: Verify Deployment (From Master Node)
+## Step 8: Verify Deployment (From Master Node)
 
 Verify that the pods are running on node 104:
 
@@ -182,7 +140,7 @@ kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- \
   curl http://object-detection-service:8000/health
 ```
 
-## Step 10: Test from Another Component
+## Step 9: Test from Another Component
 
 Test connectivity from another component (e.g., rescaling component):
 
@@ -200,6 +158,7 @@ curl http://localhost:8000/health
 ## Troubleshooting
 
 ### If pods are not running on node 104:
+
 ```bash
 # Check node labels
 kubectl get nodes --show-labels | grep csa-6343-104
@@ -212,6 +171,7 @@ kubectl describe pod <pod-name> | grep -A 10 Events
 ```
 
 ### If pods are pending:
+
 ```bash
 # Check pod description for scheduling issues
 kubectl describe pod <pod-name>
@@ -224,6 +184,7 @@ kubectl describe node csa-6343-104.utdallas.edu
 ```
 
 ### If image pull fails on K3s:
+
 ```bash
 # Verify image is imported on node 104
 ssh dxn210021@csa-6343-104.utdallas.edu
@@ -235,6 +196,7 @@ sudo k3s ctr images import /tmp/object-detection.tar
 ```
 
 ### If pods crash or restart:
+
 ```bash
 # Check logs for errors
 kubectl logs <pod-name>
@@ -249,6 +211,7 @@ kubectl exec -it <pod-name> -- ls -lh /app/yolo11n.pt 2>/dev/null || echo "Model
 ```
 
 ### If service is unreachable:
+
 ```bash
 # Check service endpoints
 kubectl get endpoints object-detection-service
@@ -263,75 +226,52 @@ curl http://object-detection-service:8000/health
 nslookup object-detection-service
 ```
 
-## Quick Deployment Script for K3s
+## Complete Deployment Script (From Master Node)
 
-Save this as `deploy-k3s.sh` on node 104:
+Save this as `deploy-k3s.sh` on master node and run everything from there:
 
 ```bash
 #!/bin/bash
 set -e
 
 echo "=== Object Detection K3s Deployment Script ==="
-echo "Target Node: csa-6343-104.utdallas.edu"
-echo ""
-
-# Build Docker image
-echo "Step 1: Building Docker image on node 104..."
-docker build -t object-detection:latest .
-
-# Save and import to K3s
-echo "Step 2: Importing image to K3s containerd..."
-docker save object-detection:latest -o /tmp/object-detection.tar
-sudo k3s ctr images import /tmp/object-detection.tar
-rm /tmp/object-detection.tar
-
-echo "Step 3: Image imported successfully!"
-sudo k3s ctr images ls | grep object-detection
-
-echo ""
-echo "Step 4: Apply deployment from MASTER node (102):"
-echo "  ssh dxn210021@csa-6343-102.utdallas.edu"
-echo "  kubectl apply -f k8s/deployment.yaml"
-echo "  kubectl apply -f k8s/service.yaml"
-echo "  kubectl apply -f k8s/hpa.yaml"
-echo ""
-```
-
-Then run on node 104:
-```bash
-chmod +x deploy-k3s.sh
-./deploy-k3s.sh
-```
-
-## Complete Deployment Script (From Master Node 102)
-
-Save this as `deploy-from-master.sh` on master node:
-
-```bash
-#!/bin/bash
-set -e
-
-echo "=== Deploying Object Detection to K3s Cluster ==="
 echo "Master Node: csa-6343-102.utdallas.edu"
 echo "Target Node: csa-6343-104.utdallas.edu"
 echo ""
 
 # Verify cluster
-echo "Checking K3s cluster status..."
-kubectl get nodes
+echo "Step 1: Checking K3s cluster status..."
+kubectl get nodes -o wide
+
+# Build image
+echo ""
+echo "Step 2: Building Docker image on master node..."
+docker build -t object-detection:latest .
+
+# Distribute image to node 104
+echo ""
+echo "Step 3: Distributing image to node 104..."
+docker save object-detection:latest -o /tmp/object-detection.tar
+scp /tmp/object-detection.tar dxn210021@csa-6343-104.utdallas.edu:/tmp/
+ssh dxn210021@csa-6343-104.utdallas.edu "sudo k3s ctr images import /tmp/object-detection.tar && rm /tmp/object-detection.tar"
+rm /tmp/object-detection.tar
+echo "✓ Image distributed successfully!"
 
 # Label node 104
-echo "Labeling node 104 for object detection workload..."
+echo ""
+echo "Step 4: Labeling node 104 for object detection workload..."
 kubectl label nodes csa-6343-104.utdallas.edu workload=object-detection --overwrite
 
 # Deploy
-echo "Deploying to K3s..."
+echo ""
+echo "Step 5: Deploying to K3s cluster..."
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/hpa.yaml 2>/dev/null || echo "HPA skipped (metrics-server may not be available)"
 
 # Wait for pods
-echo "Waiting for pods to be ready (may take 2-3 minutes for model download)..."
+echo ""
+echo "Step 6: Waiting for pods to be ready (may take 2-3 minutes for model download)..."
 kubectl wait --for=condition=ready pod -l app=object-detection --timeout=180s || true
 
 # Show status
@@ -343,11 +283,23 @@ kubectl get svc object-detection-service
 echo ""
 echo "=== Test the service ==="
 echo "kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- curl http://object-detection-service:8000/health"
+echo ""
+echo "✓ Deployment complete!"
+```
+
+**To use this script:**
+
+```bash
+# On master node (102)
+cd ~/object-detection
+chmod +x deploy-k3s.sh
+./deploy-k3s.sh
 ```
 
 ## Integration with Team Pipeline
 
 The object detection service is now available at:
+
 - **Internal Service URL:** `http://object-detection-service:8000`
 - **Endpoints:**
   - `/health` - Health check
@@ -356,6 +308,7 @@ The object detection service is now available at:
   - `/info` - Model information
 
 **For rescaling component integration:**
+
 ```python
 import requests
 
@@ -418,5 +371,3 @@ K3s Cluster Architecture:
                                                         Label: workload=
                                                                object-detection
 ```
-
-
