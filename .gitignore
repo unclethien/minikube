@@ -26,5 +26,6 @@ CLAUDE.md
 *.tar
 
 *.txt
+!requirements.txt
 *.md
 !README.md
