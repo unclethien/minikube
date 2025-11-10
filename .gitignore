@@ -24,3 +24,7 @@ plans/*
 CLAUDE.md
 
 *.tar
+
+*.txt
+*.md
+!README.md
