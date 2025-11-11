@@ -54,6 +54,17 @@ spec:
           value: "0.45"
         - name: MAX_DETECTIONS
           value: "300"
+        # Database configuration
+        - name: DB_USER
+          value: "postgres"
+        - name: DB_PASSWORD
+          value: "postgres"
+        - name: DB_HOST
+          value: "postgres-svc"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: "postgres"
         
         # Resource requests and limits
         resources:

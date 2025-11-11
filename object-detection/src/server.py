@@ -5,6 +5,7 @@ Uses YOLO12 for real-time object detection on video frames
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS, cross_origin
+from flask_sqlalchemy import SQLAlchemy
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -15,6 +16,20 @@ from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
+
+# Database configuration
+db_user = os.environ.get('DB_USER', 'postgres')
+db_pass = os.environ.get('DB_PASSWORD', 'postgres')
+db_host = os.environ.get('DB_HOST', 'postgres-svc')
+db_port = os.environ.get('DB_PORT', '5432')
+db_name = os.environ.get('DB_NAME', 'postgres')
+
+DATABASE_URI = f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URI
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+
 
 # Load YOLO12 model (using nano version for efficiency)
 # Model will be downloaded automatically on first run
@@ -42,7 +57,7 @@ def health():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'model': 'YOLOv11-nano',
+        'model': 'YOLO12-nano',
         'timestamp': datetime.now().isoformat()
     }), 200
 
@@ -241,6 +256,33 @@ def model_info():
             'max_detections': MAX_DETECTIONS
         }
     }), 200
+
+# Database model for testing
+class TestTable(db.Model):
+    __tablename__ = 'test_object_detection'
+    id = db.Column(db.Integer, primary_key=True)
+    message = db.Column(db.String(255))
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+@app.route('/test-db', methods=['GET'])
+def test_db():
+    """Test database connection endpoint"""
+    try:
+        # Perform a simple query to test the connection
+        result = db.session.query(TestTable).first()
+        if result:
+            return jsonify({
+                'success': True,
+                'data': {
+                    'id': result.id,
+                    'message': result.message,
+                    'created_at': result.created_at.isoformat() if result.created_at else None
+                }
+            }), 200
+        else:
+            return jsonify({'success': False, 'error': 'No data found'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', '8000'))

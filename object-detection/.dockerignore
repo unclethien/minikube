@@ -24,5 +24,11 @@ htmlcov/
 *.log
 runs/
 yolo11n.pt
+yolo12n.pt
+*.tar
+k8s/
+.vscode/
+.idea/
+*.pt
 
 
