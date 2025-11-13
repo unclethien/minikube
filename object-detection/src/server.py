@@ -42,11 +42,6 @@ CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.25'))
 IOU_THRESHOLD = float(os.getenv('IOU_THRESHOLD', '0.45'))
 MAX_DETECTIONS = int(os.getenv('MAX_DETECTIONS', '300'))
 
-def allowed_file(filename):
-    """Check if file has allowed extension"""
-    ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff'}
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
 def encode_image_to_base64(img):
     """Encode OpenCV image to base64 string"""
     _, buffer = cv2.imencode('.jpg', img)
@@ -80,10 +75,7 @@ def detect_objects():
         if file.filename == '':
             return jsonify({'error': 'No selected file'}), 400
 
-        if not allowed_file(file.filename):
-            return jsonify({'error': 'Invalid file type. Allowed: png, jpg, jpeg, bmp, gif, tiff'}), 400
-
-        # Read and decode image
+        # Read and decode image (OpenCV handles format validation)
         file_bytes = np.frombuffer(file.read(), np.uint8)
         img_data = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
         
@@ -175,27 +167,41 @@ def detect_objects_batch():
             return jsonify({'error': 'No files selected'}), 400
 
         results_list = []
-        
-        for idx, file in enumerate(files):
-            if not allowed_file(file.filename):
-                results_list.append({
-                    'file_index': idx,
-                    'filename': file.filename,
-                    'success': False,
-                    'error': 'Invalid file type'
-                })
-                continue
 
-            # Read and decode image
-            file_bytes = np.frombuffer(file.read(), np.uint8)
-            img_data = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-            
-            if img_data is None:
+        for idx, file in enumerate(files):
+            # Read and decode image with better error handling (OpenCV handles format validation)
+            try:
+                file_bytes = file.read()
+                print(f"[DEBUG] Batch file {idx}: {file.filename}, size: {len(file_bytes)} bytes")
+
+                if len(file_bytes) == 0:
+                    results_list.append({
+                        'file_index': idx,
+                        'filename': file.filename,
+                        'success': False,
+                        'error': 'Empty file'
+                    })
+                    continue
+
+                np_arr = np.frombuffer(file_bytes, np.uint8)
+                img_data = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+                if img_data is None:
+                    print(f"[ERROR] Failed to decode {file.filename}, first 20 bytes: {file_bytes[:20]}")
+                    results_list.append({
+                        'file_index': idx,
+                        'filename': file.filename,
+                        'success': False,
+                        'error': 'Failed to decode image - invalid format or corrupted data'
+                    })
+                    continue
+            except Exception as e:
+                print(f"[ERROR] Exception decoding {file.filename}: {str(e)}")
                 results_list.append({
                     'file_index': idx,
                     'filename': file.filename,
                     'success': False,
-                    'error': 'Failed to decode image'
+                    'error': f'Decode exception: {str(e)}'
                 })
                 continue
 
@@ -243,11 +249,187 @@ def detect_objects_batch():
             'timestamp': datetime.now().isoformat()
         }), 500
 
+@app.route('/detect/base64', methods=['POST'])
+@cross_origin(origin="*")
+def detect_objects_base64():
+    """
+    Detect objects in base64-encoded image
+    Expects: JSON with 'image' field containing base64-encoded image data
+    Returns: JSON with detections
+    """
+    try:
+        data = request.get_json()
+
+        if not data or 'image' not in data:
+            return jsonify({'error': 'No image data provided in JSON'}), 400
+
+        # Decode base64 image
+        try:
+            img_b64 = data['image']
+            img_bytes = base64.b64decode(img_b64)
+            np_arr = np.frombuffer(img_bytes, np.uint8)
+            img_data = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+            if img_data is None:
+                return jsonify({'error': 'Failed to decode base64 image'}), 400
+        except Exception as e:
+            return jsonify({'error': f'Base64 decode error: {str(e)}'}), 400
+
+        # Get original image dimensions
+        height, width = img_data.shape[:2]
+
+        # Perform object detection
+        results = model(
+            img_data,
+            conf=CONFIDENCE_THRESHOLD,
+            iou=IOU_THRESHOLD,
+            max_det=MAX_DETECTIONS,
+            verbose=False
+        )
+
+        # Process detection results
+        detections = []
+        result = results[0]
+
+        for box in result.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            confidence = float(box.conf[0].cpu().numpy())
+            class_id = int(box.cls[0].cpu().numpy())
+            class_name = model.names[class_id]
+
+            detections.append({
+                'class': class_name,
+                'class_id': class_id,
+                'confidence': confidence,
+                'bbox': {
+                    'x1': float(x1),
+                    'y1': float(y1),
+                    'x2': float(x2),
+                    'y2': float(y2)
+                }
+            })
+
+        return jsonify({
+            'success': True,
+            'timestamp': datetime.now().isoformat(),
+            'image_dimensions': {'width': width, 'height': height},
+            'detection_count': len(detections),
+            'detections': detections
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
+
+@app.route('/detect/base64/batch', methods=['POST'])
+@cross_origin(origin="*")
+def detect_objects_base64_batch():
+    """
+    Detect objects in multiple base64-encoded images
+    Expects: JSON with 'images' array, each containing 'data' (base64) and optional 'id'
+    Returns: JSON array with detections for each image
+    """
+    try:
+        data = request.get_json()
+
+        if not data or 'images' not in data:
+            return jsonify({'error': 'No images array provided in JSON'}), 400
+
+        images = data['images']
+
+        if len(images) == 0:
+            return jsonify({'error': 'Empty images array'}), 400
+
+        results_list = []
+
+        for idx, img_obj in enumerate(images):
+            img_id = img_obj.get('id', f'image_{idx}')
+
+            if 'data' not in img_obj:
+                results_list.append({
+                    'id': img_id,
+                    'success': False,
+                    'error': 'No data field in image object'
+                })
+                continue
+
+            try:
+                # Decode base64 image
+                img_b64 = img_obj['data']
+                img_bytes = base64.b64decode(img_b64)
+                print(f"[DEBUG] Base64 image {img_id}: decoded {len(img_bytes)} bytes")
+
+                np_arr = np.frombuffer(img_bytes, np.uint8)
+                img_data = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+                if img_data is None:
+                    print(f"[ERROR] Failed to decode base64 image {img_id}")
+                    results_list.append({
+                        'id': img_id,
+                        'success': False,
+                        'error': 'Failed to decode image'
+                    })
+                    continue
+
+                # Perform detection
+                detections = []
+                result = model(img_data, conf=CONFIDENCE_THRESHOLD, verbose=False)[0]
+
+                for box in result.boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    confidence = float(box.conf[0].cpu().numpy())
+                    class_id = int(box.cls[0].cpu().numpy())
+                    class_name = model.names[class_id]
+
+                    detections.append({
+                        'class': class_name,
+                        'class_id': class_id,
+                        'confidence': confidence,
+                        'bbox': {
+                            'x1': float(x1),
+                            'y1': float(y1),
+                            'x2': float(x2),
+                            'y2': float(y2)
+                        }
+                    })
+
+                results_list.append({
+                    'id': img_id,
+                    'success': True,
+                    'detection_count': len(detections),
+                    'detections': detections
+                })
+
+            except Exception as e:
+                print(f"[ERROR] Exception processing image {img_id}: {str(e)}")
+                results_list.append({
+                    'id': img_id,
+                    'success': False,
+                    'error': str(e)
+                })
+
+        return jsonify({
+            'success': True,
+            'timestamp': datetime.now().isoformat(),
+            'total_images': len(images),
+            'results': results_list
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
+
 @app.route('/info', methods=['GET'])
 def model_info():
     """Get information about the model and available classes"""
     return jsonify({
-        'model': 'YOLOv11-nano',
+        'model': 'YOLO12-nano',
         'num_classes': len(model.names),
         'classes': model.names,
         'configuration': {
