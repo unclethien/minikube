@@ -30,13 +30,13 @@ RUN adduser \
 # Copy requirements
 COPY requirements.txt .
 
-# Install Python packages with CPU-only PyTorch and aggressive cleanup
+# Install Python packages with CPU-only PyTorch and safe cleanup
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt && \
     rm requirements.txt && \
-    # Remove test files, docs, examples, and cache
-    find /usr/local/lib/python3.11 -type d \( -name "tests" -o -name "test" -o -name "__pycache__" -o -name "*.dist-info" -o -name "*.egg-info" \) -exec rm -rf {} + 2>/dev/null || true && \
-    find /usr/local/lib/python3.11 -type f \( -name "*.pyc" -o -name "*.pyo" -o -name "*.md" -o -name "*.txt" -o -name "*.rst" \) -delete && \
+    # Remove test files and cache (keep .dist-info and .egg-info for metadata)
+    find /usr/local/lib/python3.11 -type d \( -name "tests" -o -name "test" -o -name "__pycache__" \) -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib/python3.11 -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete && \
     # Remove static libraries and object files
     find /usr/local/lib/python3.11 -type f \( -name "*.a" -o -name "*.o" \) -delete && \
     # Remove PyTorch test files and benchmarks

@@ -123,7 +123,7 @@ This component is deployed to a K3s cluster with the following nodes:
 - Docker installed on your Mac
 - Access to cluster nodes (SSH with password)
 - PostgreSQL deployed in cluster (postgres-svc)
-- Outputstreaming service deployed (outputstreaming-svc)
+- Outputstreaming service deployed (outputstreaming-service)
 
 ### Quick Deployment
 
@@ -244,7 +244,7 @@ python test_client.py $(minikube service object-detection-service --url) test_im
 - `MAX_DETECTIONS`: Maximum detections per image (default: 300)
 
 **Outputstreaming Integration:**
-- `OUTPUTSTREAMING_URL`: Outputstreaming service URL (default: http://outputstreaming-svc:8080/frame)
+- `OUTPUTSTREAMING_URL`: Outputstreaming service URL (default: http://outputstreaming-service:8080/frame)
 - `SEND_TO_OUTPUTSTREAMING`: Enable/disable streaming (default: true)
 
 **Database Configuration:**
@@ -335,7 +335,7 @@ kubectl exec -it deployment/object-detection -- curl localhost:8000/test-db
 ### Outputstreaming Not Receiving Frames
 ```bash
 # Check outputstreaming service
-kubectl get svc outputstreaming-svc
+kubectl get svc outputstreaming-service
 kubectl get pods -l app=outputstreaming
 
 # Check logs for outputstreaming errors

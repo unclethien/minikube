@@ -42,7 +42,7 @@ print("Model loaded successfully!")
 CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.25'))
 IOU_THRESHOLD = float(os.getenv('IOU_THRESHOLD', '0.45'))
 MAX_DETECTIONS = int(os.getenv('MAX_DETECTIONS', '300'))
-OUTPUTSTREAMING_URL = os.getenv('OUTPUTSTREAMING_URL', 'http://outputstreaming-svc:8080/frame')
+OUTPUTSTREAMING_URL = os.getenv('OUTPUTSTREAMING_URL', 'http://outputstreaming-service:8080/frame')
 SEND_TO_OUTPUTSTREAMING = os.getenv('SEND_TO_OUTPUTSTREAMING', 'true').lower() == 'true'
 
 def send_frame_to_outputstreaming(img):
