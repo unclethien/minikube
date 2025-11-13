@@ -22,87 +22,107 @@ spec:
       nodeSelector:
         workload: object-detection
 
+      volumes:
+        - name: image-storage
+          persistentVolumeClaim:
+            claimName: image-storage-pvc
       # Pod anti-affinity to spread replicas across nodes (if multiple nodes have the label)
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                - key: workload
-                  operator: In
-                  values:
-                  - cpu-intensive
-              topologyKey: kubernetes.io/hostname
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: workload
+                      operator: In
+                      values:
+                        - cpu-intensive
+                topologyKey: kubernetes.io/hostname
 
       containers:
-      - name: object-detection
-        image: object-detection:latest
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 8000
-          name: http
-          protocol: TCP
-        
-        env:
-        - name: PORT
-          value: "8000"
-        - name: CONFIDENCE_THRESHOLD
-          value: "0.25"
-        - name: IOU_THRESHOLD
-          value: "0.45"
-        - name: MAX_DETECTIONS
-          value: "300"
-        # Database configuration
-        - name: DB_USER
-          value: "postgres"
-        - name: DB_PASSWORD
-          value: "postgres"
-        - name: DB_HOST
-          value: "postgres-svc"
-        - name: DB_PORT
-          value: "5432"
-        - name: DB_NAME
-          value: "postgres"
-        
-        # Resource requests and limits
-        resources:
-          requests:
-            cpu: "500m"       # 0.5 CPU cores
-            memory: "1Gi"     # 1 GB RAM
-          limits:
-            cpu: "2000m"      # 2 CPU cores
-            memory: "3Gi"     # 3 GB RAM
-        
-        # Liveness probe to restart unhealthy pods
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 60
-          periodSeconds: 30
-          timeoutSeconds: 10
-          failureThreshold: 3
-        
-        # Readiness probe to control traffic routing
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
-        
-        # Startup probe for initial model loading
-        startupProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 10
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 12  # Allow up to 2 minutes for startup
+        - name: object-detection
+          image: object-detection:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - name: image-storage # <-- Must match the 'volumes' name above
+              mountPath: /data/image # <-- The path your app will write to
 
+          env:
+            - name: PORT
+              value: "8000"
+            - name: CONFIDENCE_THRESHOLD
+              value: "0.25"
+            - name: IOU_THRESHOLD
+              value: "0.45"
+            - name: MAX_DETECTIONS
+              value: "300"
+            # Outputstreaming configuration
+            # - name: OUTPUTSTREAMING_URL
+            #   value: "http://outputstreaming-svc:8080/frame"
+            # - name: SEND_TO_OUTPUTSTREAMING
+            #   value: "true"
+            # Database configuration
+            - name: DB_HOST
+              value: "postgres-svc"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-configmap
+                  key: POSTGRES_DB
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+
+          # Resource requests and limits
+          resources:
+            requests:
+              cpu: "500m" # 0.5 CPU cores
+              memory: "1Gi" # 1 GB RAM
+            limits:
+              cpu: "2000m" # 2 CPU cores
+              memory: "3Gi" # 3 GB RAM
+
+          # Liveness probe to restart unhealthy pods
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          # Readiness probe to control traffic routing
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # Startup probe for initial model loading
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12 # Allow up to 2 minutes for startup
 

@@ -1,19 +1,21 @@
-# Optimized single-stage build with aggressive cleanup
-FROM python:3.11.7-slim
+# Ultra-optimized single-stage build
+FROM python:3.11-slim-bookworm
 
 # Prevent Python from writing pyc files and buffering stdout/stderr
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
-# Install system dependencies and wget in one layer
+# Install minimal system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     libgomp1 \
     wget \
-    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && apt-get clean
 
 # Create non-privileged user
@@ -28,19 +30,31 @@ RUN adduser \
 # Copy requirements
 COPY requirements.txt .
 
-# Install Python packages with CPU-only PyTorch and clean up in one layer
+# Install Python packages with CPU-only PyTorch and aggressive cleanup
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt && \
     rm requirements.txt && \
-    find /usr/local/lib/python3.11 -type d -name "tests" -o -name "test" -o -name "__pycache__" | xargs rm -rf && \
-    find /usr/local/lib/python3.11 -type f -name "*.pyc" -o -name "*.pyo" | xargs rm -f && \
-    rm -rf /root/.cache
+    # Remove test files, docs, examples, and cache
+    find /usr/local/lib/python3.11 -type d \( -name "tests" -o -name "test" -o -name "__pycache__" -o -name "*.dist-info" -o -name "*.egg-info" \) -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib/python3.11 -type f \( -name "*.pyc" -o -name "*.pyo" -o -name "*.md" -o -name "*.txt" -o -name "*.rst" \) -delete && \
+    # Remove static libraries and object files
+    find /usr/local/lib/python3.11 -type f \( -name "*.a" -o -name "*.o" \) -delete && \
+    # Remove PyTorch test files and benchmarks
+    rm -rf /usr/local/lib/python3.11/site-packages/torch/test \
+           /usr/local/lib/python3.11/site-packages/torch/lib/*.a \
+           /usr/local/lib/python3.11/site-packages/torchvision/test && \
+    # Clean all caches
+    rm -rf /root/.cache /root/.config /tmp/* /var/tmp/* && \
+    # Strip binaries
+    find /usr/local/lib/python3.11 -type f -name "*.so" -exec strip --strip-unneeded {} \; 2>/dev/null || true
 
-# Download YOLO12 model and clean up
+# Download YOLO12 model and final cleanup
 RUN wget -q https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo12n.pt -O /app/yolo12n.pt && \
     chmod 644 /app/yolo12n.pt && \
     apt-get remove -y wget && \
-    apt-get autoremove -y
+    apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/*
 
 # Copy application code
 COPY --chown=appuser:appuser src/ ./src/

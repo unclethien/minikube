@@ -6,6 +6,7 @@ opencv-python-headless==4.9.0.80
 numpy==1.26.3
 ultralytics>=8.3.0
 Pillow==10.2.0
+requests==2.31.0
 # torch and torchvision installed separately with CPU-only version in Dockerfile
 
 
