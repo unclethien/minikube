@@ -3,7 +3,7 @@ Object Detection Server for Video Processing Pipeline
 Uses YOLO12 for real-time object detection on video frames
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS, cross_origin
 from flask_sqlalchemy import SQLAlchemy
 import cv2
@@ -12,6 +12,7 @@ from ultralytics import YOLO
 import requests
 import base64
 import os
+import io
 from datetime import datetime
 
 app = Flask(__name__)
@@ -268,6 +269,105 @@ def detect_objects_batch():
             'timestamp': datetime.now().isoformat()
         }), 500
 
+@app.route('/detect/annotated', methods=['POST'])
+@cross_origin(origin="*")
+def detect_objects_annotated():
+    """
+    Detect objects and return annotated image
+    Also stores result in database
+    Expects: multipart/form-data with 'image' file
+    Returns: Annotated image as PNG
+    """
+    try:
+        if 'image' not in request.files:
+            return jsonify({'error': 'No image file provided'}), 400
+
+        file = request.files['image']
+        if file.filename == '':
+            return jsonify({'error': 'No selected file'}), 400
+
+        # Read and decode image
+        file_bytes = np.frombuffer(file.read(), np.uint8)
+        img_data = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+        if img_data is None:
+            return jsonify({'error': 'Failed to decode image'}), 400
+
+        height, width = img_data.shape[:2]
+
+        # Perform object detection
+        results = model(
+            img_data,
+            conf=CONFIDENCE_THRESHOLD,
+            iou=IOU_THRESHOLD,
+            max_det=MAX_DETECTIONS,
+            verbose=False
+        )
+
+        # Process detection results
+        detections = []
+        result = results[0]
+
+        for box in result.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            confidence = float(box.conf[0].cpu().numpy())
+            class_id = int(box.cls[0].cpu().numpy())
+            class_name = model.names[class_id]
+
+            detections.append({
+                'class': class_name,
+                'class_id': class_id,
+                'confidence': confidence,
+                'bbox': {
+                    'x1': float(x1),
+                    'y1': float(y1),
+                    'x2': float(x2),
+                    'y2': float(y2)
+                }
+            })
+
+        # Generate annotated image
+        annotated_img = result.plot()
+
+        # Send to outputstreaming
+        send_frame_to_outputstreaming(annotated_img)
+
+        # Encode annotated image as PNG
+        _, img_encoded = cv2.imencode('.png', annotated_img)
+        img_bytes = img_encoded.tobytes()
+
+        # Store in database
+        try:
+            detection_record = DetectionResult(
+                filename=file.filename,
+                detection_count=len(detections),
+                detections=detections,
+                annotated_image=img_bytes,
+                image_width=width,
+                image_height=height
+            )
+            db.session.add(detection_record)
+            db.session.commit()
+            print(f"[INFO] Stored detection result in DB (ID: {detection_record.id})")
+        except Exception as db_error:
+            print(f"[ERROR] Failed to store in DB: {str(db_error)}")
+            db.session.rollback()
+
+        # Return annotated image
+        return send_file(
+            io.BytesIO(img_bytes),
+            mimetype='image/png',
+            as_attachment=False,
+            download_name=f'annotated_{file.filename}'
+        )
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
+
 @app.route('/info', methods=['GET'])
 def model_info():
     """Get information about the model and available classes"""
@@ -289,6 +389,18 @@ class TestTable(db.Model):
     message = db.Column(db.String(255))
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
+# Database model for storing detection results
+class DetectionResult(db.Model):
+    __tablename__ = 'detection_results'
+    id = db.Column(db.Integer, primary_key=True)
+    filename = db.Column(db.String(255))
+    detection_count = db.Column(db.Integer)
+    detections = db.Column(db.JSON)  # Store detection data as JSON
+    annotated_image = db.Column(db.LargeBinary)  # Store annotated image as binary
+    image_width = db.Column(db.Integer)
+    image_height = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
 @app.route('/test-db', methods=['GET'])
 def test_db():
     """Test database connection endpoint"""
@@ -306,6 +418,57 @@ def test_db():
             }), 200
         else:
             return jsonify({'success': False, 'error': 'No data found'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/detections', methods=['GET'])
+def get_detections():
+    """Get list of all detection records (without images)"""
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        results = DetectionResult.query.order_by(
+            DetectionResult.created_at.desc()
+        ).limit(limit).offset(offset).all()
+
+        records = []
+        for result in results:
+            records.append({
+                'id': result.id,
+                'filename': result.filename,
+                'detection_count': result.detection_count,
+                'detections': result.detections,
+                'image_width': result.image_width,
+                'image_height': result.image_height,
+                'created_at': result.created_at.isoformat() if result.created_at else None
+            })
+
+        return jsonify({
+            'success': True,
+            'count': len(records),
+            'records': records
+        }), 200
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/detections/<int:detection_id>/image', methods=['GET'])
+def get_detection_image(detection_id):
+    """Get annotated image for a specific detection"""
+    try:
+        result = DetectionResult.query.get(detection_id)
+        if not result:
+            return jsonify({'error': 'Detection not found'}), 404
+
+        if not result.annotated_image:
+            return jsonify({'error': 'No image stored'}), 404
+
+        return send_file(
+            io.BytesIO(result.annotated_image),
+            mimetype='image/png',
+            as_attachment=False,
+            download_name=f'detection_{detection_id}_{result.filename}'
+        )
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

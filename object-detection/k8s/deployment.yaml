@@ -62,10 +62,10 @@ spec:
             - name: MAX_DETECTIONS
               value: "300"
             # Outputstreaming configuration
-            # - name: OUTPUTSTREAMING_URL
-            #   value: "http://outputstreaming-svc:8080/frame"
-            # - name: SEND_TO_OUTPUTSTREAMING
-            #   value: "true"
+            - name: OUTPUTSTREAMING_URL
+              value: "http://outputstreaming-svc:8080/frame"
+            - name: SEND_TO_OUTPUTSTREAMING
+              value: "true"
             # Database configuration
             - name: DB_HOST
               value: "postgres-svc"
