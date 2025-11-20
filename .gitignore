@@ -29,3 +29,6 @@ CLAUDE.md
 !requirements.txt
 *.md
 !README.md
+yolo11n.pt 
+yolo12n.pt
+repomix-output.xml
