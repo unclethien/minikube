@@ -49,7 +49,22 @@ print("Model loaded successfully!")
 CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.25'))
 IOU_THRESHOLD = float(os.getenv('IOU_THRESHOLD', '0.45'))
 MAX_DETECTIONS = int(os.getenv('MAX_DETECTIONS', '300'))
-OUTPUTSTREAMING_URL = os.getenv('OUTPUTSTREAMING_URL', 'http://outputstreaming-service:8080/frame')
+
+# Outputstreaming configuration - resolution-specific endpoints
+OUTPUTSTREAMING_URL_256P = os.getenv('OUTPUTSTREAMING_URL_256P')
+OUTPUTSTREAMING_URL_720P = os.getenv('OUTPUTSTREAMING_URL_720P')
+OUTPUTSTREAMING_URL_1080P = os.getenv('OUTPUTSTREAMING_URL_1080P')
+
+# Fallback to old single URL format for backward compatibility
+OUTPUTSTREAMING_URL_BASE = os.getenv('OUTPUTSTREAMING_URL', 'http://outputstreaming-service:8080/frame')
+
+# Build resolution-to-URL mapping
+OUTPUTSTREAMING_URLS = {
+    '256p': OUTPUTSTREAMING_URL_256P or f"{OUTPUTSTREAMING_URL_BASE}/256p",
+    '720p': OUTPUTSTREAMING_URL_720P or f"{OUTPUTSTREAMING_URL_BASE}/720p",
+    '1080p': OUTPUTSTREAMING_URL_1080P or f"{OUTPUTSTREAMING_URL_BASE}/1080p",
+}
+
 SEND_TO_OUTPUTSTREAMING = os.getenv('SEND_TO_OUTPUTSTREAMING', 'true').lower() == 'true'
 
 # Database storage configuration (optional - set to false to skip DB storage)
@@ -57,6 +72,12 @@ ENABLE_DB_STORAGE = os.getenv('ENABLE_DB_STORAGE', 'false').lower() == 'true'
 
 if not ENABLE_DB_STORAGE:
     print("[INFO] Database storage is DISABLED - frames will only be forwarded to outputstreaming")
+
+# Log outputstreaming configuration on startup
+if SEND_TO_OUTPUTSTREAMING:
+    print("[INFO] Outputstreaming endpoints configured:")
+    for res, url in OUTPUTSTREAMING_URLS.items():
+        print(f"  {res}: {url}")
 
 # Multi-resolution configuration
 RESOLUTIONS = {
@@ -149,7 +170,7 @@ def validate_image_size(file_bytes):
 def send_frame_to_outputstreaming(img, resolution='unknown'):
     """
     Send annotated frame to outputstreaming service
-    
+
     Args:
         img: Annotated image (numpy array)
         resolution: Resolution label (256p, 720p, 1080p)
@@ -157,22 +178,25 @@ def send_frame_to_outputstreaming(img, resolution='unknown'):
     if not SEND_TO_OUTPUTSTREAMING:
         return
 
+    # Get resolution-specific URL from mapping
+    url = OUTPUTSTREAMING_URLS.get(resolution)
+    if not url:
+        print(f"[WARN] No outputstreaming URL configured for resolution: {resolution}")
+        return
+
     try:
         # Encode image as PNG (preserves original format)
         _, img_encoded = cv2.imencode('.png', img)
         img_base64 = base64.b64encode(img_encoded.tobytes()).decode('utf-8')
 
-        # Build URL with resolution path: /frame/720p
-        url = f"{OUTPUTSTREAMING_URL}/{resolution}"
-
-        # Send as JSON to outputstreaming
+        # Send as JSON to resolution-specific endpoint
         response = requests.post(
             url,
             json={'frame': img_base64},
             timeout=2
         )
         if response.status_code == 200:
-            print(f"[INFO] Frame sent to outputstreaming ({resolution})")
+            print(f"[INFO] Frame sent to outputstreaming ({resolution}): {url}")
         else:
             print(f"[WARN] Outputstreaming returned {response.status_code} for {resolution}")
     except requests.exceptions.RequestException as e:

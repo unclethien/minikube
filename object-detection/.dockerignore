@@ -1,3 +1,4 @@
+# Python cache and compiled files
 __pycache__
 *.pyc
 *.pyo
@@ -8,27 +9,68 @@ __pycache__
 *.egg-info
 dist
 build
+
+# Git files
 .git
 .gitignore
+.github/
+
+# Environment files
 .env
 .venv
 venv/
+env/
+
+# Documentation (not needed in container)
 *.md
+README.md
+CHANGELOG*.md
+DEPLOY*.md
+STREAMING*.md
+
+# IDE and editor files
 .DS_Store
 *.swp
 *.swo
 *~
+.vscode/
+.idea/
+
+# Test files (not needed in production)
+test_*.py
+test_*.html
+*_test.py
 .pytest_cache
 .coverage
 htmlcov/
+
+# Logs
 *.log
+
+# Training/model runs
 runs/
+
+# YOLO model files (downloaded at runtime)
 yolo11n.pt
 yolo12n.pt
-*.tar
-k8s/
-.vscode/
-.idea/
 *.pt
+
+# Deployment files (not needed in container)
+*.tar
+*.tar.gz
+object-detection*.tar
+k8s/
+
+# Plans and documentation
+plans/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Shell scripts (deployment only)
+*.sh
+enable-streaming-complete.sh
 
 

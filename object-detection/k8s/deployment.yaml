@@ -61,9 +61,14 @@ spec:
               value: "0.45"
             - name: MAX_DETECTIONS
               value: "300"
-            # Outputstreaming configuration
-            - name: OUTPUTSTREAMING_URL
-              value: "http://outputstreaming-service:8080/frame"
+            # Outputstreaming configuration (multi-resolution endpoints)
+            # Each resolution sends to its own endpoint on the outputstreaming service
+            - name: OUTPUTSTREAMING_URL_256P
+              value: "http://outputstreaming-service:8080/frame/256p"
+            - name: OUTPUTSTREAMING_URL_720P
+              value: "http://outputstreaming-service:8080/frame/720p"
+            - name: OUTPUTSTREAMING_URL_1080P
+              value: "http://outputstreaming-service:8080/frame/1080p"
             - name: SEND_TO_OUTPUTSTREAMING
               value: "true"
             # Database configuration
