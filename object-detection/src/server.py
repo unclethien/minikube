@@ -19,6 +19,7 @@ import uuid
 import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote_plus
 
 app = Flask(__name__)
 CORS(app)
@@ -30,7 +31,8 @@ db_host = os.environ.get('DB_HOST', 'postgres-svc')
 db_port = os.environ.get('DB_PORT', '5432')
 db_name = os.environ.get('DB_NAME', 'postgres')
 
-DATABASE_URI = f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
+# URL-encode password to handle special characters like @, :, /, etc.
+DATABASE_URI = f"postgresql://{quote_plus(db_user)}:{quote_plus(db_pass)}@{db_host}:{db_port}/{db_name}"
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -49,6 +51,12 @@ IOU_THRESHOLD = float(os.getenv('IOU_THRESHOLD', '0.45'))
 MAX_DETECTIONS = int(os.getenv('MAX_DETECTIONS', '300'))
 OUTPUTSTREAMING_URL = os.getenv('OUTPUTSTREAMING_URL', 'http://outputstreaming-service:8080/frame')
 SEND_TO_OUTPUTSTREAMING = os.getenv('SEND_TO_OUTPUTSTREAMING', 'true').lower() == 'true'
+
+# Database storage configuration (optional - set to false to skip DB storage)
+ENABLE_DB_STORAGE = os.getenv('ENABLE_DB_STORAGE', 'false').lower() == 'true'
+
+if not ENABLE_DB_STORAGE:
+    print("[INFO] Database storage is DISABLED - frames will only be forwarded to outputstreaming")
 
 # Multi-resolution configuration
 RESOLUTIONS = {
@@ -138,8 +146,14 @@ def validate_image_size(file_bytes):
         )
 
 
-def send_frame_to_outputstreaming(img):
-    """Send annotated frame to outputstreaming service"""
+def send_frame_to_outputstreaming(img, resolution='unknown'):
+    """
+    Send annotated frame to outputstreaming service
+    
+    Args:
+        img: Annotated image (numpy array)
+        resolution: Resolution label (256p, 720p, 1080p)
+    """
     if not SEND_TO_OUTPUTSTREAMING:
         return
 
@@ -148,18 +162,21 @@ def send_frame_to_outputstreaming(img):
         _, img_encoded = cv2.imencode('.png', img)
         img_base64 = base64.b64encode(img_encoded.tobytes()).decode('utf-8')
 
+        # Build URL with resolution path: /frame/720p
+        url = f"{OUTPUTSTREAMING_URL}/{resolution}"
+
         # Send as JSON to outputstreaming
         response = requests.post(
-            OUTPUTSTREAMING_URL,
+            url,
             json={'frame': img_base64},
             timeout=2
         )
         if response.status_code == 200:
-            print(f"[INFO] Frame sent to outputstreaming")
+            print(f"[INFO] Frame sent to outputstreaming ({resolution})")
         else:
-            print(f"[WARN] Outputstreaming returned {response.status_code}")
+            print(f"[WARN] Outputstreaming returned {response.status_code} for {resolution}")
     except requests.exceptions.RequestException as e:
-        print(f"[ERROR] Failed to send frame to outputstreaming: {str(e)}")
+        print(f"[ERROR] Failed to send frame to outputstreaming ({resolution}): {str(e)}")
 
 def generate_correlation_id():
     """Generate UUID v4 correlation ID for linking multi-resolution frames"""
@@ -301,8 +318,8 @@ def process_single_resolution(filename, file_bytes, resolution, correlation_id, 
         # Generate annotated image
         annotated_img = result.plot()
 
-        # Send to outputstreaming
-        send_frame_to_outputstreaming(annotated_img)
+        # Send to outputstreaming with resolution
+        send_frame_to_outputstreaming(annotated_img, resolution)
 
         # Encode for storage
         _, img_encoded = cv2.imencode('.png', annotated_img)
@@ -553,10 +570,10 @@ def detect_objects_batch():
         # Phase 1C: Process resolutions in parallel
         results = process_resolutions_parallel(files_dict, correlation_id, source_topic)
 
-        # Store successful results in database
+        # Store successful results in database (if enabled)
         successful_results = [r for r in results if r.get('success', False)]
 
-        if successful_results:
+        if ENABLE_DB_STORAGE and successful_results:
             # Store each successful detection individually
             for result in successful_results:
                 try:
@@ -579,6 +596,8 @@ def detect_objects_batch():
                     # Mark this result as failed
                     result['success'] = False
                     result['error'] = 'Database insert failed'
+        elif not ENABLE_DB_STORAGE:
+            print(f"[INFO] Database storage disabled - {len(successful_results)} frames forwarded to outputstreaming only")
 
         # Calculate processing time
         processing_time_ms = (time.time() - start_time) * 1000
@@ -708,37 +727,35 @@ def detect_objects_annotated():
         # Generate annotated image
         annotated_img = result.plot()
 
-        # Send to outputstreaming
-        send_frame_to_outputstreaming(annotated_img)
+        # Send to outputstreaming with resolution
+        send_frame_to_outputstreaming(annotated_img, resolution if resolution in RESOLUTIONS else 'unknown')
 
         # Encode annotated image as PNG
         _, img_encoded = cv2.imencode('.png', annotated_img)
         img_bytes = img_encoded.tobytes()
 
-        # Store in database
-        try:
-            detection_record = DetectionResult(
-                filename=file.filename,
-                indexed_filename=indexed_filename,
-                resolution=resolution if resolution in RESOLUTIONS else None,
-                detection_count=len(detections),
-                detections=detections,
-                annotated_image=img_bytes,
-                image_width=width,
-                image_height=height
-            )
-            db.session.add(detection_record)
-            db.session.commit()
-            print(f"[INFO] Stored detection result in DB (ID: {detection_record.id}, filename: {indexed_filename})")
-        except Exception as db_error:
-            print(f"[ERROR] Failed to store in DB: {str(db_error)}")
-            db.session.rollback()
-            # Fail-fast: return error to client instead of silent failure
-            return jsonify({
-                'success': False,
-                'error': f'Database error: {str(db_error)}',
-                'timestamp': datetime.now().isoformat()
-            }), 500
+        # Store in database (if enabled)
+        if ENABLE_DB_STORAGE:
+            try:
+                detection_record = DetectionResult(
+                    filename=file.filename,
+                    indexed_filename=indexed_filename,
+                    resolution=resolution if resolution in RESOLUTIONS else None,
+                    detection_count=len(detections),
+                    detections=detections,
+                    annotated_image=img_bytes,
+                    image_width=width,
+                    image_height=height
+                )
+                db.session.add(detection_record)
+                db.session.commit()
+                print(f"[INFO] Stored detection result in DB (ID: {detection_record.id}, filename: {indexed_filename})")
+            except Exception as db_error:
+                print(f"[WARN] Failed to store in DB: {str(db_error)}")
+                db.session.rollback()
+                # Continue without failing - just log the error
+        else:
+            print(f"[INFO] Database storage disabled - frame forwarded to outputstreaming only")
 
         # Return annotated image with indexed filename
         return send_file(
@@ -836,37 +853,35 @@ def detect_resolution_specific(resolution):
         # Generate annotated image
         annotated_img = result.plot()
 
-        # Send to outputstreaming
-        send_frame_to_outputstreaming(annotated_img)
+        # Send to outputstreaming with resolution
+        send_frame_to_outputstreaming(annotated_img, resolution)
 
         # Encode annotated image as PNG
         _, img_encoded = cv2.imencode('.png', annotated_img)
         img_bytes = img_encoded.tobytes()
 
-        # Store in database
-        try:
-            detection_record = DetectionResult(
-                filename=file.filename,
-                indexed_filename=indexed_filename,
-                resolution=resolution,
-                detection_count=len(detections),
-                detections=detections,
-                annotated_image=img_bytes,
-                image_width=width,
-                image_height=height
-            )
-            db.session.add(detection_record)
-            db.session.commit()
-            print(f"[INFO] Stored detection result in DB (ID: {detection_record.id}, filename: {indexed_filename})")
-        except Exception as db_error:
-            print(f"[ERROR] Failed to store in DB: {str(db_error)}")
-            db.session.rollback()
-            # Fail-fast: return error to client instead of silent failure
-            return jsonify({
-                'success': False,
-                'error': f'Database error: {str(db_error)}',
-                'timestamp': datetime.now().isoformat()
-            }), 500
+        # Store in database (if enabled)
+        if ENABLE_DB_STORAGE:
+            try:
+                detection_record = DetectionResult(
+                    filename=file.filename,
+                    indexed_filename=indexed_filename,
+                    resolution=resolution,
+                    detection_count=len(detections),
+                    detections=detections,
+                    annotated_image=img_bytes,
+                    image_width=width,
+                    image_height=height
+                )
+                db.session.add(detection_record)
+                db.session.commit()
+                print(f"[INFO] Stored detection result in DB (ID: {detection_record.id}, filename: {indexed_filename})")
+            except Exception as db_error:
+                print(f"[WARN] Failed to store in DB: {str(db_error)}")
+                db.session.rollback()
+                # Continue without failing
+        else:
+            print(f"[INFO] Database storage disabled - frame forwarded to outputstreaming only")
 
         # Return annotated image with indexed filename
         return send_file(

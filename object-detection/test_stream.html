@@ -75,17 +75,16 @@
     <div class="info">
         <p><strong>Status:</strong> <span id="status">Connecting...</span></p>
         <p><strong>Stream Type:</strong> MJPEG at 5 FPS</p>
+
         <p><strong>Port Forward Command:</strong> <code>sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml port-forward svc/object-detection-service 8000:8000</code></p>
     </div>
-
-    <div class="button-group">
+        <div class="button-group">
         <button onclick="location.href='http://localhost:8000/stream/256p/latest'" target="_blank">📸 256p Latest</button>
         <button onclick="location.href='http://localhost:8000/stream/720p/latest'" target="_blank">📸 720p Latest</button>
         <button onclick="location.href='http://localhost:8000/stream/1080p/latest'" target="_blank">📸 1080p Latest</button>
-    </div>
 
     <div class="container">
-        <div class="stream-box">
+                <div class="stream-box">
             <h2>256p Stream</h2>
             <img class="stream" 
                  id="stream-256p"
@@ -116,7 +115,7 @@
                  alt="1080p Stream"
                  onerror="this.alt='Stream unavailable'">
             <p>High Resolution</p>
-        </div>
+
     </div>
 
     <script>
