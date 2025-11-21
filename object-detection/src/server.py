@@ -3,7 +3,7 @@ Object Detection Server for Video Processing Pipeline
 Uses YOLO12 for real-time object detection on video frames
 """
 
-from flask import Flask, request, jsonify, send_file, Response
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS, cross_origin
 from flask_sqlalchemy import SQLAlchemy
 import cv2
@@ -13,30 +13,36 @@ import requests
 import base64
 import os
 import io
+import re
 import threading
-import socket
 import uuid
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote_plus
 
 app = Flask(__name__)
 CORS(app)
 
-# Database configuration
+# Database configuration (minimal setup to satisfy flask-sqlalchemy)
 db_user = os.environ.get('DB_USER', 'postgres')
 db_pass = os.environ.get('DB_PASSWORD', 'postgres')
 db_host = os.environ.get('DB_HOST', 'postgres-svc')
 db_port = os.environ.get('DB_PORT', '5432')
 db_name = os.environ.get('DB_NAME', 'postgres')
 
-# URL-encode password to handle special characters like @, :, /, etc.
+# URL-encode password to handle special characters
 DATABASE_URI = f"postgresql://{quote_plus(db_user)}:{quote_plus(db_pass)}@{db_host}:{db_port}/{db_name}"
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
+
+# Database storage configuration (disabled by default)
+ENABLE_DB_STORAGE = os.getenv('ENABLE_DB_STORAGE', 'false').lower() == 'true'
+
+if not ENABLE_DB_STORAGE:
+    print("[INFO] Database storage is DISABLED - frames will only be forwarded to outputstreaming")
 
 
 # Load YOLO12 model (using nano version for efficiency)
@@ -67,12 +73,6 @@ OUTPUTSTREAMING_URLS = {
 
 SEND_TO_OUTPUTSTREAMING = os.getenv('SEND_TO_OUTPUTSTREAMING', 'true').lower() == 'true'
 
-# Database storage configuration (optional - set to false to skip DB storage)
-ENABLE_DB_STORAGE = os.getenv('ENABLE_DB_STORAGE', 'false').lower() == 'true'
-
-if not ENABLE_DB_STORAGE:
-    print("[INFO] Database storage is DISABLED - frames will only be forwarded to outputstreaming")
-
 # Log outputstreaming configuration on startup
 if SEND_TO_OUTPUTSTREAMING:
     print("[INFO] Outputstreaming endpoints configured:")
@@ -94,8 +94,7 @@ counter_lock = threading.Lock()
 model_lock = threading.Lock()
 
 # Pod-specific prefix for distributed deployments
-IMAGE_INDEX_PREFIX = os.getenv('IMAGE_INDEX_PREFIX', socket.gethostname())
-OUTPUT_DIR = os.getenv('OUTPUT_DIR', '/data/image')
+IMAGE_INDEX_PREFIX = os.getenv('IMAGE_INDEX_PREFIX', 'pod')
 
 # Security configuration
 MAX_IMAGE_SIZE_MB = int(os.getenv('MAX_IMAGE_SIZE_MB', '10'))  # 10MB default
@@ -211,13 +210,64 @@ def generate_correlation_id():
     """Generate UUID v4 correlation ID for linking multi-resolution frames"""
     return str(uuid.uuid4())
 
+def decode_image_file(file_obj):
+    """
+    Decode image from binary or base64-encoded content
+
+    Handles both:
+    1. Raw binary PNG/JPEG data (standard multipart/form-data)
+    2. Base64-encoded image data (cluster sends this incorrectly)
+
+    Args:
+        file_obj: Flask FileStorage object
+
+    Returns:
+        numpy.ndarray: Decoded image or None if decoding fails
+    """
+    try:
+        content = file_obj.read()
+        content_size = len(content)
+
+        print(f"[DEBUG] Decoding {file_obj.filename}: size={content_size} bytes, first_20_bytes={content[:20]}")
+
+        # Try decoding as raw binary first (standard format)
+        nparr = np.frombuffer(content, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img is not None:
+            print(f"[DEBUG] Binary decode SUCCESS: {file_obj.filename} -> shape={img.shape}")
+            return img
+
+        # Fallback: Try base64 decoding (cluster sends this)
+        try:
+            decoded = base64.b64decode(content)
+            nparr = np.frombuffer(decoded, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            if img is not None:
+                print(f"[INFO] Base64 decode SUCCESS: {file_obj.filename} -> shape={img.shape}")
+                return img
+        except Exception as b64_error:
+            print(f"[WARN] Base64 decode FAILED for {file_obj.filename}: {b64_error}")
+
+        print(f"[ERROR] All decode attempts FAILED for {file_obj.filename}")
+        return None
+
+    except Exception as e:
+        print(f"[ERROR] Image decode exception for {file_obj.filename}: {e}")
+        return None
+
 def parse_cluster_request(request):
     """
     Parse cluster multipart request with 3 resolution files + JSON metadata
 
+    FLEXIBLE PARSING:
+    - Method 1: Standard Flask request.files (if cluster sends files properly)
+    - Method 2: Extract base64 images from raw multipart data (cluster workaround)
+
     Expected format:
-    - Files: 256.png, 720.png, 1080.png
-    - JSON body or form field: {"topic": "video_frames"}
+    - Files: 256.png, 720.png, 1080.png (or any names with these patterns)
+    - JSON metadata: {"topic": "video_frames"}
 
     Returns:
         tuple: (files_dict, metadata_dict, errors)
@@ -228,35 +278,83 @@ def parse_cluster_request(request):
     # Expected file names from cluster
     expected_files = ['256.png', '720.png', '1080.png']
 
-    # Check for each expected file
-    for filename in expected_files:
-        if filename in request.files:
-            files_dict[filename] = request.files[filename]
-        else:
-            errors.append(f"Missing required file: {filename}")
+    # Method 1: Try standard Flask file parsing first
+    if request.files:
+        print(f"[DEBUG] Found files in request.files: {list(request.files.keys())}")
+        for filename in expected_files:
+            if filename in request.files:
+                file_obj = request.files[filename]
+                decoded_img = decode_image_file(file_obj)
 
-    # Parse JSON metadata - try multiple sources
+                if decoded_img is None:
+                    errors.append(f"Invalid or corrupt image: {filename}")
+                else:
+                    files_dict[filename] = decoded_img
+            else:
+                errors.append(f"Missing required file: {filename}")
+
+    # Method 2: If no files found, parse from raw multipart data
+    # This handles cluster sending base64 data without proper file encoding
+    elif request.data:
+        print(f"[DEBUG] No files in request.files, parsing raw multipart data...")
+        try:
+            data_str = request.data.decode('utf-8', errors='ignore')
+
+            # Extract base64-encoded images from multipart boundaries
+            for filename in expected_files:
+                # Pattern: name="256.png"\r\n\r\n<base64_data>
+                pattern = rf'name="{re.escape(filename)}"\r?\n\r?\n([A-Za-z0-9+/=]+)'
+                match = re.search(pattern, data_str, re.MULTILINE | re.DOTALL)
+
+                if match:
+                    base64_data = match.group(1).strip()
+                    # Clean up base64 (remove newlines, boundaries)
+                    base64_data = re.sub(r'[\r\n-]+', '', base64_data)
+
+                    try:
+                        # Decode base64
+                        img_bytes = base64.b64decode(base64_data)
+                        # Decode image
+                        nparr = np.frombuffer(img_bytes, np.uint8)
+                        decoded_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+                        if decoded_img is not None:
+                            files_dict[filename] = decoded_img
+                            print(f"[INFO] Extracted {filename} from raw multipart data ({len(img_bytes)} bytes)")
+                        else:
+                            errors.append(f"Failed to decode extracted image: {filename}")
+                    except Exception as e:
+                        errors.append(f"Base64 decode error for {filename}: {str(e)}")
+                else:
+                    errors.append(f"Missing required file: {filename}")
+
+        except Exception as e:
+            print(f"[ERROR] Failed to parse raw multipart data: {e}")
+            errors.append(f"Multipart parsing error: {str(e)}")
+    else:
+        errors.append("No image data received (empty request.files and request.data)")
+
+    # Parse topic metadata from raw multipart data
     metadata = {}
-    try:
-        # Try request.get_json() first (Content-Type: application/json)
-        json_data = request.get_json(silent=True)
-        if json_data:
-            metadata = json_data
-        # Fallback: try form data
-        elif 'topic' in request.form:
-            metadata = {'topic': request.form.get('topic')}
-        # Fallback: try request data
-        elif request.data:
-            import json
-            try:
-                metadata = json.loads(request.data)
-            except:
-                pass
-    except:
-        pass
+    topic = 'unknown'
 
-    # Extract topic with default
-    topic = metadata.get('topic', 'unknown')
+    if request.data:
+        try:
+            data_str = request.data.decode('utf-8', errors='ignore')
+            # Pattern matches: name="topic"\r\n\r\nvideo_frames
+            topic_match = re.search(r'name="topic"\r?\n\r?\n([^\r\n]+)', data_str)
+            if topic_match:
+                topic = topic_match.group(1).strip()
+        except Exception as e:
+            print(f"[WARN] Failed to parse topic from raw multipart data: {e}")
+
+    # Fallback: Check query parameters
+    if topic == 'unknown' and 'topic' in request.args:
+        topic = request.args.get('topic')
+
+    # Log warning if topic couldn't be extracted
+    if topic == 'unknown':
+        print(f"[WARN] Topic could not be extracted from request")
 
     return files_dict, {'topic': topic}, errors
 
@@ -388,7 +486,7 @@ def process_resolutions_parallel(files_dict, correlation_id, source_topic):
     Process multiple resolutions in parallel using ThreadPoolExecutor (Phase 1C)
 
     Args:
-        files_dict: Dict of {filename: file_object}
+        files_dict: Dict of {filename: file_object} or {filename: numpy_array}
         correlation_id: UUID linking all resolutions
         source_topic: Kafka topic name
 
@@ -399,9 +497,17 @@ def process_resolutions_parallel(files_dict, correlation_id, source_topic):
     start_time = time.time()
 
     # Read all files first (I/O outside thread pool)
+    # Handle both FileStorage objects and pre-decoded numpy arrays
     files_data = {}
-    for filename, file_obj in files_dict.items():
-        file_bytes = file_obj.read()
+    for filename, file_obj_or_array in files_dict.items():
+        # Check if already decoded (numpy array)
+        if isinstance(file_obj_or_array, np.ndarray):
+            # Already decoded by parse_cluster_request
+            file_bytes = cv2.imencode('.png', file_obj_or_array)[1].tobytes()
+        else:
+            # FileStorage object - read as usual
+            file_bytes = file_obj_or_array.read()
+
         if len(file_bytes) == 0:
             # Skip empty files
             continue
@@ -582,14 +688,25 @@ def detect_objects_batch():
         # Parse cluster request (accept any file names)
         files_dict, metadata, parse_errors = parse_cluster_request(request)
 
+        # DEBUG LOGGING - capture exact validation failure details
+        print(f"[DEBUG] /detect/batch request received from {request.remote_addr}")
+        print(f"[DEBUG] Request files: {list(request.files.keys())}")
+        print(f"[DEBUG] Files decoded successfully: {list(files_dict.keys())}")
+        print(f"[DEBUG] Metadata extracted: {metadata}")
+        print(f"[DEBUG] Parse errors: {parse_errors}")
+
         if parse_errors:
-            return jsonify({
+            error_response = {
                 'success': False,
                 'error': 'Invalid request format',
                 'details': parse_errors,
                 'expected_files': ['256.png', '720.png', '1080.png'],
-                'expected_metadata': {'topic': 'string'}
-            }), 400
+                'expected_metadata': {'topic': 'string'},
+                'received_files': list(request.files.keys()),
+                'files_decoded': list(files_dict.keys())
+            }
+            print(f"[ERROR] /detect/batch validation failed: {error_response}")
+            return jsonify(error_response), 400
 
         source_topic = metadata['topic']
         correlation_id = generate_correlation_id()
@@ -600,10 +717,8 @@ def detect_objects_batch():
         results = process_resolutions_parallel(files_dict, correlation_id, source_topic)
 
         # Store successful results in database (if enabled)
-        successful_results = [r for r in results if r.get('success', False)]
-
-        if ENABLE_DB_STORAGE and successful_results:
-            # Store each successful detection individually
+        if ENABLE_DB_STORAGE:
+            successful_results = [r for r in results if r.get('success', False)]
             for result in successful_results:
                 try:
                     detection_record = DetectionResult(
@@ -622,11 +737,6 @@ def detect_objects_batch():
                 except Exception as db_error:
                     print(f"[ERROR] Failed to store in DB: {str(db_error)}")
                     db.session.rollback()
-                    # Mark this result as failed
-                    result['success'] = False
-                    result['error'] = 'Database insert failed'
-        elif not ENABLE_DB_STORAGE:
-            print(f"[INFO] Database storage disabled - {len(successful_results)} frames forwarded to outputstreaming only")
 
         # Calculate processing time
         processing_time_ms = (time.time() - start_time) * 1000
@@ -675,131 +785,6 @@ def detect_objects_batch():
             'success': False,
             'error': str(e),
             'processing_time_ms': round(processing_time_ms, 2),
-            'timestamp': datetime.now().isoformat()
-        }), 500
-
-@app.route('/detect/annotated', methods=['POST'])
-@cross_origin(origin="*")
-def detect_objects_annotated():
-    """
-    Detect objects and return annotated image
-    Also stores result in database with indexed filename
-    Expects: multipart/form-data with image file (any field name)
-    Optional: 'resolution' form field (256p, 720p, 1080p) for metadata
-    Optional: 'topic' form field for source topic identification
-    Returns: Annotated image as PNG
-    """
-    try:
-        # Get the first file from request (accepts any field name)
-        if not request.files:
-            return jsonify({'error': 'No image file provided'}), 400
-
-        # Get first uploaded file regardless of field name
-        file = next(iter(request.files.values()))
-        if file.filename == '':
-            return jsonify({'error': 'No selected file'}), 400
-
-        # Get optional resolution and topic parameters
-        resolution = request.form.get('resolution', 'unknown')
-        source_topic = request.form.get('topic', 'direct_upload')
-
-        # Read file bytes
-        file_bytes = file.read()
-
-        # Validate image size
-        try:
-            validate_image_size(file_bytes)
-        except ValueError as e:
-            return jsonify({'error': str(e)}), 413  # Payload Too Large
-
-        # Decode image
-        np_arr = np.frombuffer(file_bytes, np.uint8)
-        img_data = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-        if img_data is None:
-            return jsonify({'error': 'Failed to decode image'}), 400
-
-        height, width = img_data.shape[:2]
-
-        # Generate indexed filename
-        indexed_filename = generate_indexed_filename(resolution if resolution in RESOLUTIONS else 'unknown')
-
-        # Perform object detection
-        results = model(
-            img_data,
-            conf=CONFIDENCE_THRESHOLD,
-            iou=IOU_THRESHOLD,
-            max_det=MAX_DETECTIONS,
-            verbose=False
-        )
-
-        # Process detection results
-        detections = []
-        result = results[0]
-
-        for box in result.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            confidence = float(box.conf[0].cpu().numpy())
-            class_id = int(box.cls[0].cpu().numpy())
-            class_name = model.names[class_id]
-
-            detections.append({
-                'class': class_name,
-                'class_id': class_id,
-                'confidence': confidence,
-                'bbox': {
-                    'x1': float(x1),
-                    'y1': float(y1),
-                    'x2': float(x2),
-                    'y2': float(y2)
-                }
-            })
-
-        # Generate annotated image
-        annotated_img = result.plot()
-
-        # Send to outputstreaming with resolution and topic
-        send_frame_to_outputstreaming(annotated_img, resolution if resolution in RESOLUTIONS else 'unknown', source_topic)
-
-        # Encode annotated image as PNG
-        _, img_encoded = cv2.imencode('.png', annotated_img)
-        img_bytes = img_encoded.tobytes()
-
-        # Store in database (if enabled)
-        if ENABLE_DB_STORAGE:
-            try:
-                detection_record = DetectionResult(
-                    filename=file.filename,
-                    indexed_filename=indexed_filename,
-                    resolution=resolution if resolution in RESOLUTIONS else None,
-                    detection_count=len(detections),
-                    detections=detections,
-                    annotated_image=img_bytes,
-                    image_width=width,
-                    image_height=height
-                )
-                db.session.add(detection_record)
-                db.session.commit()
-                print(f"[INFO] Stored detection result in DB (ID: {detection_record.id}, filename: {indexed_filename})")
-            except Exception as db_error:
-                print(f"[WARN] Failed to store in DB: {str(db_error)}")
-                db.session.rollback()
-                # Continue without failing - just log the error
-        else:
-            print(f"[INFO] Database storage disabled - frame forwarded to outputstreaming only")
-
-        # Return annotated image with indexed filename
-        return send_file(
-            io.BytesIO(img_bytes),
-            mimetype='image/png',
-            as_attachment=False,
-            download_name=indexed_filename
-        )
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e),
             'timestamp': datetime.now().isoformat()
         }), 500
 
@@ -945,17 +930,9 @@ def model_info():
             'confidence_threshold': CONFIDENCE_THRESHOLD,
             'iou_threshold': IOU_THRESHOLD,
             'max_detections': MAX_DETECTIONS
-        }
-    }), 200
+        }        }), 200
 
-# Database model for testing
-class TestTable(db.Model):
-    __tablename__ = 'test_object_detection'
-    id = db.Column(db.Integer, primary_key=True)
-    message = db.Column(db.String(255))
-    created_at = db.Column(db.DateTime, server_default=db.func.now())
-
-# Database model for storing detection results
+# Database model for storing detection results (optional - only used if ENABLE_DB_STORAGE=true)
 class DetectionResult(db.Model):
     __tablename__ = 'detection_results'
     id = db.Column(db.Integer, primary_key=True)
@@ -968,281 +945,6 @@ class DetectionResult(db.Model):
     image_width = db.Column(db.Integer)
     image_height = db.Column(db.Integer)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
-
-@app.route('/test-db', methods=['GET'])
-def test_db():
-    """Test database connection endpoint"""
-    try:
-        # Perform a simple query to test the connection
-        result = db.session.query(TestTable).first()
-        if result:
-            return jsonify({
-                'success': True,
-                'data': {
-                    'id': result.id,
-                    'message': result.message,
-                    'created_at': result.created_at.isoformat() if result.created_at else None
-                }
-            }), 200
-        else:
-            return jsonify({'success': False, 'error': 'No data found'}), 404
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/detections', methods=['GET'])
-def get_detections():
-    """
-    Get list of all detection records (without images)
-
-    Query params:
-    - limit: Number of results (default: 50)
-    - offset: Pagination offset (default: 0)
-    - resolution: Filter by resolution (optional)
-    """
-    try:
-        limit = request.args.get('limit', 50, type=int)
-        offset = request.args.get('offset', 0, type=int)
-        resolution = request.args.get('resolution', None, type=str)
-
-        # Build query with optional filters
-        query = DetectionResult.query
-
-        if resolution:
-            query = query.filter_by(resolution=resolution)
-
-        results = query.order_by(
-            DetectionResult.created_at.desc()
-        ).limit(limit).offset(offset).all()
-
-        records = []
-        for result in results:
-            records.append({
-                'id': result.id,
-                'filename': result.filename,
-                'indexed_filename': result.indexed_filename,
-                'resolution': result.resolution,
-                'detection_count': result.detection_count,
-                'detections': result.detections,
-                'image_width': result.image_width,
-                'image_height': result.image_height,
-                'created_at': result.created_at.isoformat() if result.created_at else None
-            })
-
-        return jsonify({
-            'success': True,
-            'count': len(records),
-            'resolution_filter': resolution,
-            'records': records
-        }), 200
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/detections/<int:detection_id>/image', methods=['GET'])
-def get_detection_image(detection_id):
-    """Get annotated image for a specific detection"""
-    try:
-        result = DetectionResult.query.get(detection_id)
-        if not result:
-            return jsonify({'error': 'Detection not found'}), 404
-
-        if not result.annotated_image:
-            return jsonify({'error': 'No image stored'}), 404
-
-        return send_file(
-            io.BytesIO(result.annotated_image),
-            mimetype='image/png',
-            as_attachment=False,
-            download_name=f'detection_{detection_id}_{result.filename}'
-        )
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-# Streaming Endpoints (Phase 1 & 2)
-
-@app.route('/stream/<resolution>/latest', methods=['GET'])
-@cross_origin(origin="*")
-def get_latest_frame(resolution):
-    """
-    Get most recent annotated frame for resolution (Phase 1)
-
-    Returns PNG image with custom headers
-    """
-    try:
-        # Validate resolution
-        if resolution not in RESOLUTIONS:
-            return jsonify({
-                'error': f'Invalid resolution: {resolution}',
-                'valid_resolutions': list(RESOLUTIONS.keys())
-            }), 400
-
-        # Query latest frame
-        result = DetectionResult.query.filter_by(
-            resolution=resolution
-        ).order_by(
-            DetectionResult.created_at.desc()
-        ).first()
-
-        # Handle no frames found
-        if not result or not result.annotated_image:
-            return jsonify({
-                'error': f'No frames found for resolution {resolution}'
-            }), 404
-
-        # Prepare response
-        response = send_file(
-            io.BytesIO(result.annotated_image),
-            mimetype='image/png',
-            as_attachment=False
-        )
-
-        # Add custom headers
-        response.headers['X-Frame-ID'] = str(result.id)
-        response.headers['X-Frame-Timestamp'] = result.created_at.isoformat()
-        response.headers['X-Detection-Count'] = str(result.detection_count)
-        response.headers['Cache-Control'] = 'max-age=1, must-revalidate'
-
-        return response
-
-    except Exception as e:
-        return jsonify({
-            'error': str(e),
-            'timestamp': datetime.now().isoformat()
-        }), 500
-
-def format_mjpeg_frame(image_bytes):
-    """
-    Format PNG binary as MJPEG frame with multipart boundary (Phase 2)
-
-    Args:
-        image_bytes: PNG binary data (BYTEA from DB)
-
-    Returns:
-        bytes: Formatted multipart frame
-    """
-    return (
-        b'--frame\r\n'
-        b'Content-Type: image/png\r\n'
-        b'Content-Length: ' + str(len(image_bytes)).encode() + b'\r\n\r\n'
-        + image_bytes + b'\r\n'
-    )
-
-def get_frames_since(resolution, last_timestamp, limit=10):
-    """
-    Get frames newer than timestamp (Phase 2)
-
-    Args:
-        resolution: Resolution label (256p, 720p, 1080p)
-        last_timestamp: datetime or None
-        limit: Max frames to fetch
-
-    Returns:
-        list: DetectionResult objects
-    """
-    query = DetectionResult.query.filter_by(resolution=resolution)
-
-    if last_timestamp:
-        query = query.filter(DetectionResult.created_at > last_timestamp)
-
-    return query.order_by(
-        DetectionResult.created_at.asc()
-    ).limit(limit).all()
-
-def generate_mjpeg_stream(resolution, start_time=None):
-    """
-    Generate MJPEG stream for resolution (Phase 2)
-
-    Args:
-        resolution: Resolution label (256p, 720p, 1080p)
-        start_time: Optional datetime for historical playback
-
-    Yields:
-        bytes: MJPEG frame data
-    """
-    # Initialize cursor
-    if start_time:
-        last_timestamp = start_time
-    else:
-        # Start from most recent frame
-        latest = DetectionResult.query.filter_by(
-            resolution=resolution
-        ).order_by(
-            DetectionResult.created_at.desc()
-        ).first()
-
-        if latest:
-            last_timestamp = latest.created_at - timedelta(seconds=1)
-        else:
-            last_timestamp = datetime.now()
-
-    # Stream timeout (5 minutes)
-    timeout = time.time() + 300
-    frame_delay = 0.2  # 5 FPS
-
-    while time.time() < timeout:
-        # Query frames since last timestamp
-        frames = get_frames_since(resolution, last_timestamp, limit=10)
-
-        if frames:
-            # Stream available frames
-            for frame in frames:
-                yield format_mjpeg_frame(frame.annotated_image)
-                last_timestamp = frame.created_at
-                time.sleep(frame_delay)
-        else:
-            # No new frames, wait and retry
-            time.sleep(frame_delay)
-
-@app.route('/stream/<resolution>', methods=['GET'])
-@cross_origin(origin="*")
-def stream_resolution(resolution):
-    """
-    MJPEG streaming endpoint for resolution (Phase 2)
-
-    Query params:
-        start_time: Optional ISO timestamp for historical playback
-                   (e.g., 2025-11-19T10:00:00)
-
-    Returns:
-        Streaming response with multipart/x-mixed-replace
-    """
-    try:
-        # Validate resolution
-        if resolution not in RESOLUTIONS:
-            return jsonify({
-                'error': f'Invalid resolution: {resolution}',
-                'valid_resolutions': list(RESOLUTIONS.keys())
-            }), 400
-
-        # Parse start_time parameter
-        start_time = None
-        start_time_str = request.args.get('start_time')
-
-        if start_time_str:
-            try:
-                # Parse ISO format: 2025-11-19T10:00:00
-                start_time = datetime.fromisoformat(start_time_str)
-            except ValueError:
-                return jsonify({
-                    'error': 'Invalid start_time format. Use ISO format: 2025-11-19T10:00:00'
-                }), 400
-
-        # Return streaming response
-        return Response(
-            generate_mjpeg_stream(resolution, start_time),
-            mimetype='multipart/x-mixed-replace; boundary=frame',
-            headers={
-                'Cache-Control': 'no-cache, no-store, must-revalidate',
-                'Connection': 'keep-alive',
-                'X-Stream-FPS': '5',
-                'X-Stream-Resolution': resolution
-            }
-        )
-
-    except Exception as e:
-        return jsonify({
-            'error': str(e),
-            'timestamp': datetime.now().isoformat()
-        }), 500
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', '8000'))
