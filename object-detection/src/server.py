@@ -167,13 +167,14 @@ def validate_image_size(file_bytes):
         )
 
 
-def send_frame_to_outputstreaming(img, resolution='unknown'):
+def send_frame_to_outputstreaming(img, resolution='unknown', source_topic='unknown'):
     """
     Send annotated frame to outputstreaming service
 
     Args:
         img: Annotated image (numpy array)
         resolution: Resolution label (256p, 720p, 1080p)
+        source_topic: Source topic name for filtering (e.g., 'video_frames')
     """
     if not SEND_TO_OUTPUTSTREAMING:
         return
@@ -189,14 +190,18 @@ def send_frame_to_outputstreaming(img, resolution='unknown'):
         _, img_encoded = cv2.imencode('.png', img)
         img_base64 = base64.b64encode(img_encoded.tobytes()).decode('utf-8')
 
-        # Send as JSON to resolution-specific endpoint
+        # Send as JSON to resolution-specific endpoint with topic metadata
         response = requests.post(
             url,
-            json={'frame': img_base64},
+            json={
+                'frame': img_base64,
+                'topic': source_topic,
+                'resolution': resolution
+            },
             timeout=2
         )
         if response.status_code == 200:
-            print(f"[INFO] Frame sent to outputstreaming ({resolution}): {url}")
+            print(f"[INFO] Frame sent to outputstreaming ({resolution}, topic={source_topic}): {url}")
         else:
             print(f"[WARN] Outputstreaming returned {response.status_code} for {resolution}")
     except requests.exceptions.RequestException as e:
@@ -342,8 +347,8 @@ def process_single_resolution(filename, file_bytes, resolution, correlation_id, 
         # Generate annotated image
         annotated_img = result.plot()
 
-        # Send to outputstreaming with resolution
-        send_frame_to_outputstreaming(annotated_img, resolution)
+        # Send to outputstreaming with resolution and topic
+        send_frame_to_outputstreaming(annotated_img, resolution, source_topic)
 
         # Encode for storage
         _, img_encoded = cv2.imencode('.png', annotated_img)
@@ -681,6 +686,7 @@ def detect_objects_annotated():
     Also stores result in database with indexed filename
     Expects: multipart/form-data with image file (any field name)
     Optional: 'resolution' form field (256p, 720p, 1080p) for metadata
+    Optional: 'topic' form field for source topic identification
     Returns: Annotated image as PNG
     """
     try:
@@ -693,8 +699,9 @@ def detect_objects_annotated():
         if file.filename == '':
             return jsonify({'error': 'No selected file'}), 400
 
-        # Get optional resolution parameter
+        # Get optional resolution and topic parameters
         resolution = request.form.get('resolution', 'unknown')
+        source_topic = request.form.get('topic', 'direct_upload')
 
         # Read file bytes
         file_bytes = file.read()
@@ -751,8 +758,8 @@ def detect_objects_annotated():
         # Generate annotated image
         annotated_img = result.plot()
 
-        # Send to outputstreaming with resolution
-        send_frame_to_outputstreaming(annotated_img, resolution if resolution in RESOLUTIONS else 'unknown')
+        # Send to outputstreaming with resolution and topic
+        send_frame_to_outputstreaming(annotated_img, resolution if resolution in RESOLUTIONS else 'unknown', source_topic)
 
         # Encode annotated image as PNG
         _, img_encoded = cv2.imencode('.png', annotated_img)
@@ -803,6 +810,7 @@ def detect_resolution_specific(resolution):
     Detect objects at specific resolution (256p, 720p, 1080p)
     Endpoints: /detect/256p, /detect/720p, /detect/1080p
     Expects: multipart/form-data with image file (any field name, already resized by upstream)
+    Optional: 'topic' form field for source topic identification
     Returns: Annotated image as PNG with indexed filename
     """
     try:
@@ -821,6 +829,9 @@ def detect_resolution_specific(resolution):
         file = next(iter(request.files.values()))
         if file.filename == '':
             return jsonify({'error': 'No selected file'}), 400
+
+        # Get optional topic parameter
+        source_topic = request.form.get('topic', 'direct_upload')
 
         # Read file bytes
         file_bytes = file.read()
@@ -877,8 +888,8 @@ def detect_resolution_specific(resolution):
         # Generate annotated image
         annotated_img = result.plot()
 
-        # Send to outputstreaming with resolution
-        send_frame_to_outputstreaming(annotated_img, resolution)
+        # Send to outputstreaming with resolution and topic
+        send_frame_to_outputstreaming(annotated_img, resolution, source_topic)
 
         # Encode annotated image as PNG
         _, img_encoded = cv2.imencode('.png', annotated_img)
