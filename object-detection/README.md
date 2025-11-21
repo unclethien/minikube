@@ -1,398 +1,302 @@
 # Object Detection Component
 
-Component 3 of the Video Processing Security System - Real-time object detection using YOLO12
+Component 3 of the Video Processing Security System - Multi-resolution real-time object detection using YOLO12
 
 ## Overview
 
-This component provides real-time object detection capabilities for video frames using the YOLO12 deep learning model. It receives images from the video processing pipeline, detects objects of interest (people, vehicles, etc.), and returns detection results with bounding boxes and confidence scores. Results are stored in PostgreSQL and optionally streamed to outputstreaming service for real-time viewing.
+This component provides multi-resolution object detection for video frames using YOLO12-nano. It receives frames from the cluster component in 3 resolutions (256p, 720p, 1080p), processes them in parallel, and streams annotated results to the outputstreaming service.
+
+**Version:** 2.1.0 (Multi-Resolution + Flexible Parsing)
 
 ## Features
 
-- **YOLO12 Object Detection**: Latest YOLO model for real-time object detection
-- **REST API**: Simple HTTP endpoints for easy integration
-- **Batch Processing**: Support for processing multiple images
-- **Annotated Output**: Returns images with bounding boxes drawn
-- **PostgreSQL Storage**: Persistent storage of detection results and annotated images
-- **Outputstreaming Integration**: Real-time frame streaming to outputstreaming service
-- **Health Monitoring**: Built-in health check endpoints
-- **Horizontal Auto-scaling**: Automatically scales based on CPU/memory usage
-- **CPU-Optimized**: Efficient CPU-based inference using YOLO12-nano (~1.3GB Docker image)
+### Core Capabilities
+- **Multi-Resolution Processing**: Parallel processing of 256p, 720p, 1080p frames
+- **YOLO12-nano Detection**: Fast CPU-optimized object detection
+- **Flexible Input Parsing**: Handles both standard file uploads and base64-encoded data
+- **Topic-Based Routing**: Kafka topic metadata passed to outputstreaming
+- **Thread-Safe Processing**: ThreadPoolExecutor with model locking
+- **Streaming Endpoints**: MJPEG streaming and latest-frame APIs
+
+### Performance
+- **<500ms**: 3-resolution parallel processing
+- **~24 fps**: Throughput with 2 replicas
+- **<1.5GB**: Docker image size (CPU-optimized)
+- **Zero Collisions**: Thread-safe filename indexing
+
+### Integration
+- **Cluster Input**: Multipart/form-data from cluster component
+- **Outputstreaming Output**: Resolution-specific endpoints with topic metadata
+- **PostgreSQL Storage**: Optional database persistence (disabled by default)
+- **K3s Deployment**: Horizontal autoscaling, health checks, resource limits
+
+## Architecture
+
+```
+Cluster Component (10.42.0.198, 10.42.3.52)
+    ↓ POST /detect/batch (multipart/form-data)
+    ├─ Files: 256.png, 720.png, 1080.png (base64 or binary)
+    └─ Metadata: topic (video_frames, video_frames2)
+    ↓
+Object Detection Service
+    ├─ parse_cluster_request() → Extract images + topic
+    ├─ decode_image_file() → Handle base64/binary
+    ├─ process_resolutions_parallel() → ThreadPoolExecutor
+    │   ├─ 256p → YOLO inference
+    │   ├─ 720p → YOLO inference
+    │   └─ 1080p → YOLO inference
+    └─ send_to_outputstreaming() → With topic metadata
+    ↓
+Outputstreaming Service (8080)
+    ├─ POST /frame/256p {frame, topic, resolution}
+    ├─ POST /frame/720p {frame, topic, resolution}
+    └─ POST /frame/1080p {frame, topic, resolution}
+```
 
 ## API Endpoints
 
 ### Detection Endpoints
 
-#### `POST /detect`
-Basic object detection - Returns JSON only
-- **Input**: `multipart/form-data` with `image` file
-- **Output**: JSON with detections, bounding boxes, and metadata
-
 #### `POST /detect/batch`
-Batch object detection - Process multiple images, sends to outputstreaming
-- **Input**: `multipart/form-data` with multiple `images` files
-- **Output**: JSON array with detections for each image
-- **Note**: Automatically sends annotated frames to outputstreaming service
+**Primary endpoint for cluster integration** - Processes 3 resolutions in parallel
 
-#### `POST /detect/annotated` ⭐ NEW
-Detect with annotated image - Returns PNG + stores in DB + sends to outputstreaming
-- **Input**: `multipart/form-data` with `image` file
-- **Output**: PNG image with bounding boxes drawn
-- **Features**: Returns annotated image, stores in database, streams to outputstreaming
+**Input:** `multipart/form-data`
+- Files: `256.png`, `720.png`, `1080.png` (base64-encoded or binary)
+- Metadata: `topic` field (e.g., `video_frames`)
 
-### Database Endpoints
+**Output:** JSON
+```json
+{
+  "success": true,
+  "correlation_id": "uuid-here",
+  "source_topic": "video_frames",
+  "results": [
+    {"resolution": "256p", "indexed_filename": "...", "detection_count": 5},
+    {"resolution": "720p", "indexed_filename": "...", "detection_count": 5},
+    {"resolution": "1080p", "indexed_filename": "...", "detection_count": 5}
+  ],
+  "processing_time_ms": 347.2,
+  "timestamp": "2025-11-21T01:30:00Z"
+}
+```
 
-#### `GET /detections`
-List all detection records (without images)
-- **Query params**: `limit` (default: 50), `offset` (default: 0)
-- **Output**: JSON array of detection metadata
+**Behavior:**
+- Decodes all 3 images (binary or base64)
+- Processes in parallel using ThreadPoolExecutor
+- Sends annotated frames to outputstreaming with topic metadata
+- Returns correlation ID linking all 3 resolutions
 
-#### `GET /detections/<id>/image`
-Retrieve stored annotated image
-- **Output**: PNG image from database
+#### `POST /detect/256p`, `/detect/720p`, `/detect/1080p`
+Single-resolution detection endpoints
 
-### System Endpoints
+**Input:** `multipart/form-data` with image file
+**Output:** JSON with detections + sends to outputstreaming
+
+#### `POST /detect`
+Legacy single-frame detection (backward compatibility)
+
+### Streaming Endpoints
+
+#### `GET /stream/{resolution}/latest`
+Get latest annotated frame for resolution (256p, 720p, 1080p)
+
+**Output:** PNG image with bounding boxes
+**Headers:** `X-Frame-ID`, `X-Frame-Timestamp`, `X-Detection-Count`
+
+#### `GET /stream/{resolution}`
+MJPEG streaming for resolution
+
+**Output:** `multipart/x-mixed-replace` stream (5 FPS)
+**Query Params:** `?start_time=2025-11-21T00:00:00Z` (ISO 8601)
+
+See [STREAMING_ENDPOINTS.md](STREAMING_ENDPOINTS.md) for details.
+
+### Health & Info
 
 #### `GET /health`
 Health check endpoint
-- **Output**: Server status and model information
+
+**Output:**
+```json
+{
+  "status": "healthy",
+  "model": "YOLO12-nano",
+  "timestamp": "2025-11-21T01:30:00Z"
+}
+```
 
 #### `GET /info`
-Model information
-- **Output**: Model details, classes, and configuration
-
-#### `GET /test-db`
-Database connection test
-- **Output**: Connection status
-
-**Complete API documentation:** See [API_ENDPOINTS.md](API_ENDPOINTS.md)
-
-## Local Development
-
-### Prerequisites
-- Python 3.11+
-- Docker Desktop
-- Minikube (for Kubernetes deployment)
-
-### Running Locally
-
-1. Install dependencies:
-```bash
-cd object-detection
-pip install -r requirements.txt
-```
-
-2. Run the server:
-```bash
-python src/server.py
-```
-
-The server will start on `http://localhost:8000`
-
-3. Test the server:
-```bash
-python test_client.py http://localhost:8000 path/to/test/image.jpg
-```
-
-## Docker Deployment
-
-### Build the Docker image:
-```bash
-docker build -t object-detection:latest .
-```
-
-### Run the container:
-```bash
-docker run -p 8000:8000 object-detection:latest
-```
-
-### Test the containerized service:
-```bash
-python test_client.py http://localhost:8000 test_image.jpg
-```
-
-## K3s Cluster Deployment
-
-### Cluster Setup
-This component is deployed to a K3s cluster with the following nodes:
-- **Node 102** (csa-6343-102.utdallas.edu) - Control Plane
-- **Node 103** (csa-6343-103.utdallas.edu) - Worker Node
-- **Node 104** (csa-6343-104.utdallas.edu) - Worker Node (target for object-detection)
-- **Username**: dxn210021
-
-### Prerequisites
-- Docker installed on your Mac
-- Access to cluster nodes (SSH with password)
-- PostgreSQL deployed in cluster (postgres-svc)
-- Outputstreaming service deployed (outputstreaming-service)
-
-### Quick Deployment
-
-**Complete step-by-step guide:** See [DEPLOYMENT.md](DEPLOYMENT.md)
-
-#### Summary Steps:
-
-1. **Build Docker image** (On Your Mac):
-```bash
-cd /Users/thiennguyen/Documents/GitHub/minikube/object-detection
-docker build --platform linux/amd64 -t object-detection:latest .
-docker save object-detection:latest -o object-detection.tar
-```
-
-2. **Transfer to Worker Node 104**:
-```bash
-scp object-detection.tar dxn210021@csa-6343-104.utdallas.edu:/tmp/
-```
-
-3. **Import image** (On Node 104):
-```bash
-ssh dxn210021@csa-6343-104.utdallas.edu
-sudo /usr/local/bin/ctr -n k8s.io images import /tmp/object-detection.tar
-sudo /usr/local/bin/ctr -n k8s.io images ls | grep object-detection
-exit
-```
-
-4. **Transfer K8s configs** (From Your Mac):
-```bash
-scp k8s/deployment.yaml dxn210021@csa-6343-102.utdallas.edu:/tmp/k8s/
-scp k8s/service.yaml dxn210021@csa-6343-102.utdallas.edu:/tmp/k8s/
-```
-
-5. **Label node and deploy** (On Node 102):
-```bash
-ssh dxn210021@csa-6343-102.utdallas.edu
-
-# Label node 104
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml label nodes csa-6343-104.utdallas.edu workload=object-detection
-
-# Deploy
-cd /tmp/k8s/
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml apply -f deployment.yaml
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml apply -f service.yaml
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml rollout status deployment/object-detection
-```
-
-6. **Run database migration** (On Node 102):
-```bash
-kubectl exec -it deployment/postgres -- psql -U postgres -d postgres
-# Run SQL from db/migrations/001_create_detection_results.sql
-```
-
-### Access the Service
-
-**Internal Cluster Access**:
-```bash
-curl http://object-detection-svc:8000/health
-```
-
-**From Pod**:
-```bash
-kubectl exec -it deployment/object-detection -- curl localhost:8000/health
-```
-
-### Monitor the Deployment
-```bash
-# Check pods (should be on node 104)
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml get pods -l app=object-detection -o wide
-
-# View logs
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml logs -l app=object-detection --tail=50 -f
-
-# Check service
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml get svc object-detection-svc
-
-# Check resource usage
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml top pods -l app=object-detection
-```
-
-## Local Testing with Minikube (Optional)
-
-For local development and testing before VM deployment:
-
-### 1. Start Minikube
-```bash
-minikube start --cpus=4 --memory=8192
-```
-
-### 2. Build image in Minikube's Docker environment
-```bash
-eval $(minikube docker-env)
-docker build -t object-detection:latest .
-```
-
-### 3. Deploy to Minikube
-```bash
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
-minikube addons enable metrics-server
-kubectl apply -f k8s/hpa.yaml
-```
-
-### 4. Test locally
-```bash
-minikube service object-detection-service --url
-python test_client.py $(minikube service object-detection-service --url) test_image.jpg
-```
+Service information and configuration
 
 ## Configuration
 
 ### Environment Variables
 
-**Detection Settings:**
-- `PORT`: Server port (default: 8000)
-- `CONFIDENCE_THRESHOLD`: Minimum confidence for detections (default: 0.25)
-- `IOU_THRESHOLD`: IOU threshold for NMS (default: 0.45)
-- `MAX_DETECTIONS`: Maximum detections per image (default: 300)
+**Required:**
+- `OUTPUTSTREAMING_URL_256P` - Outputstreaming endpoint for 256p frames
+- `OUTPUTSTREAMING_URL_720P` - Outputstreaming endpoint for 720p frames
+- `OUTPUTSTREAMING_URL_1080P` - Outputstreaming endpoint for 1080p frames
 
-**Outputstreaming Integration:**
-- `OUTPUTSTREAMING_URL`: Outputstreaming service URL (default: http://outputstreaming-service:8080/frame)
-- `SEND_TO_OUTPUTSTREAMING`: Enable/disable streaming (default: true)
+**Optional:**
+- `ENABLE_DB_STORAGE` - Enable PostgreSQL storage (default: `false`)
+- `SEND_TO_OUTPUTSTREAMING` - Enable outputstreaming (default: `true`)
+- `CONFIDENCE_THRESHOLD` - YOLO confidence threshold (default: `0.25`)
+- `IOU_THRESHOLD` - YOLO IOU threshold (default: `0.45`)
+- `MAX_DETECTIONS` - Max detections per image (default: `100`)
+- `MAX_IMAGE_SIZE_MB` - Max upload size per image (default: `10`)
+- `IMAGE_INDEX_PREFIX` - Pod-specific prefix for filenames (default: `pod`)
 
-**Database Configuration:**
-- `DB_HOST`: PostgreSQL host (default: postgres-svc)
-- `DB_PORT`: PostgreSQL port (default: 5432)
-- `DB_NAME`: Database name (from ConfigMap: postgres-configmap)
-- `DB_USER`: Database user (from Secret: postgres-secret)
-- `DB_PASSWORD`: Database password (from Secret: postgres-secret)
+**Database (if ENABLE_DB_STORAGE=true):**
+- `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`, `DB_NAME`
 
-## Resource Requirements
+## Deployment
 
-### CPU Deployment
-- **Requests**: 500m CPU, 1Gi RAM
-- **Limits**: 2000m CPU, 3Gi RAM
+### K3s Deployment
 
-## Scaling
+```bash
+# Apply manifests
+kubectl apply -f k8s/
 
-The Horizontal Pod Autoscaler (HPA) automatically scales the deployment:
-- **Min replicas**: 2
-- **Max replicas**: 6
-- **Scale up trigger**: CPU > 70% or Memory > 80%
-- **Scale down trigger**: CPU < 70% and Memory < 80%
+# Check status
+kubectl get pods -l app=object-detection
+kubectl logs -f -l app=object-detection
 
-## Architecture
-
+# Scale
+kubectl scale deployment object-detection --replicas=3
 ```
-┌─────────────┐         ┌──────────────────┐         ┌──────────────────┐
-│   Client/   │         │    Object        │         │  Outputstreaming │
-│   Pipeline  │──POST──>│   Detection      │──Base64─>│    Service       │
-│             │         │   Service        │         │  (Real-time)     │
-└─────────────┘         └──────────────────┘         └──────────────────┘
-                               │
-                               │ YOLO12-nano
-                               ▼
-                        ┌──────────────┐
-                        │  PostgreSQL  │
-                        │  (Storage)   │
-                        │ - Detections │
-                        │ - Images     │
-                        └──────────────┘
 
-Integration Flow:
-1. Real-time Streaming:    Image → /detect/batch → Outputstreaming → WebSocket
-2. Annotated with Storage: Image → /detect/annotated → [DB + Outputstreaming + Return PNG]
-3. Historical Retrieval:   /detections → List → /detections/{id}/image → Get PNG
+### Docker Build
+
+```bash
+# Build for linux/amd64
+docker build --platform linux/amd64 -t object-detection:latest .
+
+# Save and transfer
+docker save object-detection:latest -o object-detection.tar
+scp object-detection.tar user@node:~/
+
+# Import on K3s worker node
+ssh user@worker "sudo k3s ctr images import /tmp/object-detection.tar"
+
+# Restart deployment
+kubectl rollout restart deployment object-detection
+```
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for complete instructions.
+
+## Recent Changes
+
+### v2.1.0 - Flexible Parsing (2025-11-21)
+- **Fixed:** Handles cluster sending base64 images without proper file encoding
+- **Added:** Raw multipart parsing with regex extraction
+- **Added:** Automatic detection of binary vs base64 content
+- **Performance:** <50ms parsing overhead
+
+### v2.0.0 - Multi-Resolution (2025-11-19)
+- **Added:** Parallel processing of 3 resolutions (<500ms total)
+- **Added:** Topic-based routing to outputstreaming
+- **Added:** Thread-safe indexed filename generation
+- **Added:** MJPEG streaming endpoints
+- **Changed:** Database storage optional (disabled by default)
+
+See [CHANGELOG.md](CHANGELOG.md) for full history.
+
+## Testing
+
+### Local Testing
+
+```bash
+# Run test script
+python test_base64_fix.py
+
+# Test with curl
+curl -X POST http://localhost:8000/detect/batch \
+  -F "256.png=@test_256.png" \
+  -F "720.png=@test_720.png" \
+  -F "1080.png=@test_1080.png" \
+  -F "topic=video_frames"
+```
+
+### Production Monitoring
+
+```bash
+# Watch logs
+kubectl logs -f -l app=object-detection | grep -E "INFO|ERROR|WARN"
+
+# Check metrics
+kubectl top pods -l app=object-detection
+
+# Test health
+curl http://object-detection-service:8000/health
 ```
 
 ## Troubleshooting
 
-**Complete troubleshooting guide:** See [DEPLOYMENT.md](DEPLOYMENT.md#troubleshooting)
+### 400 Errors from Cluster
 
-### Pods Not Starting
-```bash
-# Check pod events
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml describe pod <pod-name>
+**Symptoms:** `[ERROR] /detect/batch validation failed: Missing required file: 256.png`
 
-# Check logs
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml logs <pod-name> --tail=100
+**Causes:**
+1. Cluster not sending files (check `request.files: []`)
+2. Cluster configuration pointing to wrong URL
+3. Network issues between cluster and object detection
 
-# Common issues:
-# - Image not found: Re-import on node 104
-# - ConfigMap/Secret missing: Check postgres-configmap and postgres-secret
-# - Node label missing: Add workload=object-detection label to node 104
+**Solutions:**
+1. Verify `NEXT_PROCESSING_STAGE_URL` in cluster config
+2. Check cluster logs for sending errors
+3. Test with curl to isolate issue
+
+### Topic Shows as "unknown"
+
+**Symptoms:** `topic=unknown` in logs
+
+**Cause:** Topic metadata not sent or not parsed correctly
+
+**Solutions:**
+1. Check cluster sends topic in multipart data
+2. Verify regex pattern matches format
+3. Add query parameter: `/detect/batch?topic=video_frames`
+
+### Slow Processing (>500ms)
+
+**Causes:**
+1. Large image sizes (>10MB)
+2. Too many detections (>100 objects)
+3. Insufficient CPU resources
+
+**Solutions:**
+1. Reduce image sizes at cluster level
+2. Increase `MAX_DETECTIONS` threshold
+3. Scale up replicas or CPU limits
+
+## Performance
+
+### Benchmarks
+- **Single Frame:** ~150-200ms (1920x1080)
+- **3 Resolutions Parallel:** ~350-450ms
+- **Throughput (2 replicas):** ~24 frames/sec
+- **Memory per Pod:** ~1.5-2GB
+- **CPU per Pod:** 0.5-1.5 cores
+
+### Resource Limits (K3s)
+```yaml
+resources:
+  requests:
+    memory: "1Gi"
+    cpu: "500m"
+  limits:
+    memory: "3Gi"
+    cpu: "2000m"
 ```
-
-### Image Pull Errors
-```bash
-# Verify image on node 104
-ssh dxn210021@csa-6343-104.utdallas.edu
-sudo /usr/local/bin/ctr -n k8s.io images ls | grep object-detection
-
-# If missing, re-import
-sudo /usr/local/bin/ctr -n k8s.io images import /tmp/object-detection.tar
-```
-
-### Database Connection Errors
-```bash
-# Check postgres service
-kubectl get svc postgres-svc
-
-# Check postgres pods
-kubectl get pods -l app=postgres
-
-# Test connection from pod
-kubectl exec -it deployment/object-detection -- curl localhost:8000/test-db
-```
-
-### Outputstreaming Not Receiving Frames
-```bash
-# Check outputstreaming service
-kubectl get svc outputstreaming-service
-kubectl get pods -l app=outputstreaming
-
-# Check logs for outputstreaming errors
-kubectl logs -l app=object-detection | grep outputstreaming
-
-# Verify environment variable
-kubectl exec -it deployment/object-detection -- env | grep OUTPUTSTREAMING
-```
-
-### Kubectl Connection Refused
-```bash
-# Error: dial tcp [::1]:8080: connect: connection refused
-# Fix: Use sudo kubectl with kubeconfig flag
-sudo kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml get nodes
-```
-
-## Performance Notes
-
-- YOLO12-nano is optimized for speed while maintaining good accuracy
-- Average inference time: 50-100ms per image (CPU)
-- Supports COCO dataset classes (80 classes including person, car, etc.)
-- Horizontal scaling allows aggregate throughput of 20-90 images/sec
-- Docker image size: ~1.3GB (optimized with CPU-only PyTorch)
-- Database storage: Images stored as BYTEA, detections as JSONB
-
-## Database Schema
-
-See [db/migrations/001_create_detection_results.sql](db/migrations/001_create_detection_results.sql)
-
-```sql
-CREATE TABLE detection_results (
-    id SERIAL PRIMARY KEY,
-    filename VARCHAR(255),
-    detection_count INTEGER,
-    detections JSONB,
-    annotated_image BYTEA,
-    image_width INTEGER,
-    image_height INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-## Future Enhancements
-
-- [x] ~~Add PostgreSQL storage for detection results~~ ✅ Implemented
-- [x] ~~Implement real-time streaming to outputstreaming service~~ ✅ Implemented
-- [x] ~~Add annotated image endpoint~~ ✅ Implemented
-- [ ] Add Redis caching for repeated detections
-- [ ] Add support for custom trained models
-- [ ] Implement detection filtering by class
-- [ ] Add tracking across frames
-- [ ] Implement batch retrieval of historical detections
 
 ## Documentation
 
-- **Deployment Guide**: [DEPLOYMENT.md](DEPLOYMENT.md) - Complete step-by-step deployment instructions
-- **API Reference**: [API_ENDPOINTS.md](API_ENDPOINTS.md) - Complete API documentation with examples
-- **Database Migration**: [db/migrations/001_create_detection_results.sql](db/migrations/001_create_detection_results.sql)
+- [API_ENDPOINTS.md](API_ENDPOINTS.md) - Complete API reference
+- [STREAMING_ENDPOINTS.md](STREAMING_ENDPOINTS.md) - Streaming API details
+- [DEPLOYMENT.md](DEPLOYMENT.md) - Deployment procedures
+- [CHANGELOG.md](CHANGELOG.md) - Version history
+- [plans/](../plans/) - Implementation plans and phase documentation
 
+## License
 
+Internal use only - UTD CS6343 Course Project
