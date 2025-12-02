@@ -22,10 +22,10 @@ spec:
       nodeSelector:
         workload: object-detection
 
-      volumes:
-        - name: image-storage
-          persistentVolumeClaim:
-            claimName: image-storage-pvc
+      # volumes:
+      #   - name: image-storage
+      #     persistentVolumeClaim:
+      #       claimName: image-storage-pvc
       # Pod anti-affinity to spread replicas across nodes (if multiple nodes have the label)
       affinity:
         podAntiAffinity:
@@ -48,9 +48,9 @@ spec:
             - containerPort: 8000
               name: http
               protocol: TCP
-          volumeMounts:
-            - name: image-storage # <-- Must match the 'volumes' name above
-              mountPath: /data/image # <-- The path your app will write to
+          # volumeMounts:
+          #   - name: image-storage # <-- Must match the 'volumes' name above
+          #     mountPath: /data/image # <-- The path your app will write to
 
           env:
             - name: PORT
@@ -71,26 +71,26 @@ spec:
               value: "http://outputstreaming-service:8080/frame/1080p"
             - name: SEND_TO_OUTPUTSTREAMING
               value: "true"
-            # Database configuration
-            - name: DB_HOST
-              value: "postgres-svc"
-            - name: DB_PORT
-              value: "5432"
-            - name: DB_NAME
-              valueFrom:
-                configMapKeyRef:
-                  name: postgres-configmap
-                  key: POSTGRES_DB
-            - name: DB_USER
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-secret
-                  key: POSTGRES_USER
-            - name: DB_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-secret
-                  key: POSTGRES_PASSWORD
+            # # Database configuration
+            # - name: DB_HOST
+            #   value: "postgres-svc"
+            # - name: DB_PORT
+            #   value: "5432"
+            # - name: DB_NAME
+            #   valueFrom:
+            #     configMapKeyRef:
+            #       name: postgres-configmap
+            #       key: POSTGRES_DB
+            # - name: DB_USER
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: postgres-secret
+            #       key: POSTGRES_USER
+            # - name: DB_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: postgres-secret
+            #       key: POSTGRES_PASSWORD
 
           # Resource requests and limits
           resources:

@@ -19,30 +19,32 @@ import uuid
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import quote_plus
 
 app = Flask(__name__)
 CORS(app)
 
-# Database configuration (minimal setup to satisfy flask-sqlalchemy)
-db_user = os.environ.get('DB_USER', 'postgres')
-db_pass = os.environ.get('DB_PASSWORD', 'postgres')
-db_host = os.environ.get('DB_HOST', 'postgres-svc')
-db_port = os.environ.get('DB_PORT', '5432')
-db_name = os.environ.get('DB_NAME', 'postgres')
+# Database storage configuration (disabled by default)
+ENABLE_DB_STORAGE = os.getenv('ENABLE_DB_STORAGE', 'false').lower() == 'true'
 
-# URL-encode password to handle special characters
-DATABASE_URI = f"postgresql://{quote_plus(db_user)}:{quote_plus(db_pass)}@{db_host}:{db_port}/{db_name}"
+# Use SQLite in-memory as dummy DB when database is disabled (no PostgreSQL connection needed)
+# This satisfies flask-sqlalchemy without requiring psycopg2 or a real database
+if ENABLE_DB_STORAGE:
+    from urllib.parse import quote_plus
+    db_user = os.environ.get('DB_USER', 'postgres')
+    db_pass = os.environ.get('DB_PASSWORD', 'postgres')
+    db_host = os.environ.get('DB_HOST', 'postgres-svc')
+    db_port = os.environ.get('DB_PORT', '5432')
+    db_name = os.environ.get('DB_NAME', 'postgres')
+    DATABASE_URI = f"postgresql://{quote_plus(db_user)}:{quote_plus(db_pass)}@{db_host}:{db_port}/{db_name}"
+    print("[INFO] Database storage is ENABLED - connecting to PostgreSQL")
+else:
+    DATABASE_URI = "sqlite:///:memory:"
+    print("[INFO] Database storage is DISABLED - using in-memory SQLite (no DB operations)")
+
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
-
-# Database storage configuration (disabled by default)
-ENABLE_DB_STORAGE = os.getenv('ENABLE_DB_STORAGE', 'false').lower() == 'true'
-
-if not ENABLE_DB_STORAGE:
-    print("[INFO] Database storage is DISABLED - frames will only be forwarded to outputstreaming")
 
 
 # Load YOLO12 model (using nano version for efficiency)
